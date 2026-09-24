@@ -30,8 +30,18 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Configure Android SDK Location
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
+
       - name: Sync Capacitor Android
         run: npx cap sync android
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
 
       - name: Make Gradlew Executable
         run: chmod +x android/gradlew
@@ -39,7 +49,10 @@ jobs:
       - name: Build Debug APK
         run: |
           cd android
-          ./gradlew assembleDebug
+          ./gradlew assembleDebug --stacktrace
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
