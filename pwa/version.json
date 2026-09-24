@@ -1,10 +1,10 @@
 {
-  "version": "2.3.21",
-  "buildCode": 21,
+  "version": "2.3.22",
+  "buildCode": 22,
   "buildDate": "2026-09-24",
   "changelog": "NovaX V2.3: Ultra-compact landscape cockpit, locked orientation, manual servo head pan controls (< SCAN >), on-demand draw buttons, and GitHub Cloud ESP32 OTA.",
   "firmware": {
-    "version": "2.3.21",
+    "version": "2.3.22",
     "binUrl": "https://raw.githubusercontent.com/onebotyt/robocar/main/firmware/NovaX-Firmware.bin",
     "releaseDate": "2026-09-24",
     "changelog": "ESP32 V2.3: WebSocket server (:81), 400ms motor watchdog, MPU6050 yaw assistance, and manual servo head pan (< SCAN >)."
