@@ -1,6 +1,13 @@
-# NovaX Cyber Cockpit & Mobile App V2
+# 🚗 NovaX Cyber Cockpit & Mobile App V2
 
-High-performance mobile phone controller for the NovaX ESP32 robot car.
+> **High-performance mobile phone controller for the NovaX ESP32 robot car.**
+
+[![Download Android APK](https://img.shields.io/badge/Download-Android%20APK%20(Direct)-brightgreen?style=for-the-badge&logo=android)](https://github.com/onebotyt/robocar/raw/main/apk/NovaX-Controller.apk)
+[![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-Auto%20Build%20APK-blue?style=for-the-badge&logo=githubactions)](https://github.com/onebotyt/robocar/actions)
+
+### 📲 [👉 Click here to directly download NovaX-Controller.apk](https://github.com/onebotyt/robocar/raw/main/apk/NovaX-Controller.apk)
+
+The ready-to-install Android APK is compiled by GitHub Actions and saved directly inside this repository folder under [`apk/NovaX-Controller.apk`](apk/NovaX-Controller.apk).
 
 ---
 

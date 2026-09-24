@@ -12,6 +12,8 @@ android/app/build/
 android/app/release/
 android/**/*.apk
 android/**/*.aab
+!apk/
+!apk/**
 android/local.properties
 android/.idea/
 android/*.iml
