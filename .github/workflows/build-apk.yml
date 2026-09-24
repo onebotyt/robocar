@@ -37,21 +37,28 @@ jobs:
       - name: Build Debug APK
         run: |
           cd android
-          ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee ../gradle.log
-        continue-on-error: false
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Collect Generated APK
+        run: |
+          mkdir -p build-output
+          find android/ -name "*.apk"
+          APK_FILE=$(find android/app/build/outputs/apk/ -name "*.apk" | head -n 1)
+          echo "Found APK: $APK_FILE"
+          cp "$APK_FILE" build-output/NovaX-Controller.apk
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NovaX-Controller-Debug-APK
-          path: android/app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
+          name: NovaX-Controller-APK
+          path: build-output/NovaX-Controller.apk
+          if-no-files-found: warn
 
       - name: Create Release & Attach APK (On Tags)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: android/app/build/outputs/apk/debug/app-debug.apk
+          files: build-output/NovaX-Controller.apk
           name: NovaX Controller ${{ github.ref_name }}
           body_path: pwa/version.json
         env:
