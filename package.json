@@ -1,0 +1,21 @@
+{
+  "name": "novax_pwa_ota_v2",
+  "version": "1.0.0",
+  "description": "This project separates the phone controller from the ESP32 hardware firmware.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node -e \"const http=require('http'),fs=require('fs'),path=require('path');http.createServer((req,res)=>{let f=path.join('pwa',req.url==='/'?'index.html':req.url.split('?')[0]);if(fs.existsSync(f)){let ext=path.extname(f);let m=ext==='.html'?'text/html':ext==='.css'?'text/css':ext==='.js'?'application/javascript':ext==='.svg'?'image/svg+xml':ext==='.png'?'image/png':'text/plain';res.writeHead(200,{'Content-Type':m});fs.createReadStream(f).pipe(res);}else{res.writeHead(404);res.end();}}).listen(8080,()=>console.log('NovaX Controller running at http://localhost:8080'));\"",
+    "sync": "cap sync",
+    "open:android": "cap open android",
+    "build:apk": "cd android && gradlew.bat assembleDebug"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/cli": "^8.5.2",
+    "@capacitor/core": "^8.5.2"
+  }
+}

@@ -1,0 +1,21 @@
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+
+# Android build outputs
+android/.gradle/
+android/build/
+android/app/build/
+android/app/release/
+android/**/*.apk
+android/**/*.aab
+android/local.properties
+android/.idea/
+android/*.iml
+android/app/*.iml
+
+# IDE files
+.vscode/
+.idea/
