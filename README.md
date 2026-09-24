@@ -105,7 +105,7 @@ All pins adhere strictly to the finalized NovaX V2 hardware design:
 
 ## 3. ESP32 Firmware Build & Flash
 
-The complete firmware is located at [`esp32/NovaX_V2.ino`](esp32/NovaX_V2.ino) (mirrored at [`firmware/NovaX_ESP32.ino`](firmware/NovaX_ESP32.ino)).
+The complete firmware is located at [`esp32/NovaX_V2.ino`](esp32/NovaX_V2.ino).
 
 ### Prerequisites
 - [Arduino IDE 2.x](https://www.arduino.cc/en/software) or [PlatformIO](https://platformio.org/)
