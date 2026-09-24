@@ -1,10 +1,10 @@
 {
-  "version": "2.4.23",
-  "buildCode": 23,
+  "version": "2.4.25",
+  "buildCode": 25,
   "buildDate": "2026-09-24",
   "changelog": "NovaX V2.4: Auto-mode UI locking, STOP/START toggle, boot-to-manual, firmware version display, and full ESP32 REST API.",
   "firmware": {
-    "version": "2.4.23",
+    "version": "2.4.25",
     "binUrl": "https://raw.githubusercontent.com/onebotyt/robocar/main/firmware/NovaX-Firmware.bin",
     "releaseDate": "2026-09-24",
     "changelog": "ESP32 V2.4: carStopped state, full REST API endpoints, and auto-mode command blocking."

@@ -1,8 +1,8 @@
 {
-  "version": "2.4.0",
-  "buildDate": "2026-09-25",
+  "version": "2.4.25",
+  "buildDate": "2026-09-24",
   "target": "ESP32-WROOM-32",
   "binFile": "NovaX-Firmware.bin",
   "downloadUrl": "https://raw.githubusercontent.com/onebotyt/robocar/main/firmware/NovaX-Firmware.bin",
-  "changelog": "NovaX V2.4: Hardened WebSocket engine (timeout guards, size cap, version-safe accept key), non-blocking gyro rotate, cached sonar, deferred STA connect, OTA auth flag, async Wi-Fi scan, CORS pre-flight, sonar-off auto-mode guard."
+  "changelog": "NovaX V2.4: Auto-mode UI locking, STOP/START toggle, boot-to-manual, firmware version display, and full ESP32 REST API."
 }
