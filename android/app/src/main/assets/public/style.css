@@ -526,6 +526,35 @@ html, body {
 
 .hero-blue { background: var(--color-blue); }
 .hero-red { background: var(--color-red); }
+.hero-green {
+  background: #00bfa5 !important;
+  box-shadow: 0 0 10px rgba(0, 191, 165, 0.45);
+}
+.hero-green:hover {
+  filter: brightness(1.15);
+}
+
+/* Auto Mode Control Locking (Locks drive, rotation & scan controls) */
+.auto-locked {
+  pointer-events: none !important;
+  opacity: 0.22 !important;
+  filter: grayscale(1) brightness(0.6) !important;
+  cursor: not-allowed !important;
+  transition: opacity 0.25s, filter 0.25s;
+}
+
+/* Auto Mode Button Active Indicator */
+.active-auto-mode {
+  background: #ff6d00 !important;
+  box-shadow: 0 0 12px rgba(255, 109, 0, 0.55) !important;
+  color: #ffffff !important;
+  animation: pulseAutoBtn 2s infinite ease-in-out;
+}
+
+@keyframes pulseAutoBtn {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.85; filter: brightness(1.2); }
+}
 
 /* Control Groups (Rotation & LEDs) */
 .control-group {

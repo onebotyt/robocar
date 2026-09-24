@@ -105,6 +105,7 @@ Preferences nvsPrefs;
 volatile unsigned long lastDriveCmdMs = 0;
 volatile bool motorRunning = false;
 volatile bool manualMode   = true;
+volatile bool carStopped   = false;
 
 // MPU6050 Heading & Gyro State
 bool mpuAvailable = false;
@@ -129,9 +130,9 @@ int radarStepDir = 1;
 unsigned long lastRadarStepMs = 0;
 int scanDistLeft = 400, scanDistFront = 400, scanDistRight = 400;
 
-// Auto Avoidance State
-enum AutoDriveState { AUTO_FORWARD, AUTO_DETECTED, AUTO_REVERSE, AUTO_SCAN, AUTO_TURN };
-AutoDriveState autoState = AUTO_FORWARD;
+// Auto Avoidance State (Default to AUTO_STOPPED on boot)
+enum AutoDriveState { AUTO_STOPPED, AUTO_FORWARD, AUTO_DETECTED, AUTO_REVERSE, AUTO_SCAN, AUTO_TURN };
+AutoDriveState autoState = AUTO_STOPPED;
 unsigned long autoActionTimer = 0;
 
 // Wi-Fi Configuration State
@@ -548,7 +549,7 @@ void handleWsMessage(WiFiClient& client, const String& msg) {
   // Simple, robust zero-dependency JSON extraction
   // 1. Move Command
   if (msg.indexOf("\"type\":\"move\"") >= 0) {
-    if (!manualMode) return;
+    if (!manualMode || carStopped) return;
     int dirIdx = msg.indexOf("\"dir\":\"");
     if (dirIdx >= 0) {
       char dir = msg.charAt(dirIdx + 7);
@@ -580,18 +581,33 @@ void handleWsMessage(WiFiClient& client, const String& msg) {
   }
   // 2. Emergency Stop
   else if (msg.indexOf("\"type\":\"stop\"") >= 0) {
+    carStopped = true;
     stopCar();
+    autoState = AUTO_STOPPED;
     lastDriveCmdMs = millis();
-    sendWsFrame(client, "{\"type\":\"stopped\"}");
+    broadcastWsText("{\"type\":\"stopped\",\"mode\":\"" + String(manualMode ? "manual" : "auto") + "\"}");
+  }
+  // 2b. Start / Resume Command
+  else if (msg.indexOf("\"type\":\"start\"") >= 0) {
+    carStopped = false;
+    if (!manualMode) {
+      autoState = AUTO_FORWARD;
+      Serial.println("[MODE] Autonomous Driving Resumed");
+    } else {
+      Serial.println("[MODE] Manual Driver Ready");
+    }
+    broadcastWsText("{\"type\":\"started\",\"mode\":\"" + String(manualMode ? "manual" : "auto") + "\"}");
   }
   // 3. Mode Toggle
   else if (msg.indexOf("\"type\":\"mode\"") >= 0) {
+    carStopped = false;
     if (msg.indexOf("\"value\":\"auto\"") >= 0) {
       manualMode = false;
       autoState = AUTO_FORWARD;
       Serial.println("[MODE] Autonomous Navigation Active");
     } else {
       manualMode = true;
+      autoState = AUTO_STOPPED;
       stopCar();
       Serial.println("[MODE] Manual Driver Control Active");
     }
@@ -599,7 +615,7 @@ void handleWsMessage(WiFiClient& client, const String& msg) {
   }
   // 4. Gyroscope Assisted Rotation
   else if (msg.indexOf("\"type\":\"rotate\"") >= 0) {
-    if (!manualMode) return;
+    if (!manualMode || carStopped) return;
     if (msg.indexOf("\"dir\":\"left\"") >= 0) {
       turnByGyro(90.0f, false);
     } else if (msg.indexOf("\"dir\":\"right\"") >= 0) {
@@ -687,7 +703,10 @@ void stepRadarScan() {
 }
 
 void stepAutoNav() {
-  if (manualMode) return;
+  if (manualMode || carStopped || autoState == AUTO_STOPPED) {
+    stopCar();
+    return;
+  }
 
   long distance = readUltrasonicCM();
 
@@ -951,12 +970,15 @@ void handleStatus() {
   String ip = (WiFi.getMode() == WIFI_AP ? WiFi.softAPIP().toString() : WiFi.localIP().toString());
   String s = "{";
   s += "\"distance\":" + String(d) + ",";
-  s += "\"mode\":" + String(manualMode ? 1 : 0) + ",";
+  s += "\"mode\":\"" + String(manualMode ? "manual" : "auto") + "\",";
+  s += "\"manual\":" + String(manualMode ? 1 : 0) + ",";
+  s += "\"stopped\":" + String(carStopped || autoState == AUTO_STOPPED ? 1 : 0) + ",";
   s += "\"yaw\":" + String(yawHeading, 1) + ",";
   s += "\"camera\":" + String(cameraAvailable ? 1 : 0) + ",";
   s += "\"wifiMode\":\"" + wifiMode + "\",";
   s += "\"ip\":\"" + ip + "\",";
-  s += "\"version\":\"" + String(FIRMWARE_VERSION) + "\"";
+  s += "\"version\":\"" + String(FIRMWARE_VERSION) + "\",";
+  s += "\"firmware\":\"" + String(FIRMWARE_VERSION) + "\"";
   s += "}";
   restServer.send(200, "application/json", s);
 }
@@ -1094,6 +1116,98 @@ void setup() {
       restServer.send(400, "text/plain", "Missing angle parameter");
     }
   });
+  restServer.on("/stop", HTTP_POST, []() {
+    setCorsHeaders();
+    carStopped = true;
+    stopCar();
+    autoState = AUTO_STOPPED;
+    restServer.send(200, "application/json", "{\"status\":\"stopped\"}");
+  });
+  restServer.on("/start", HTTP_POST, []() {
+    setCorsHeaders();
+    carStopped = false;
+    if (!manualMode) {
+      autoState = AUTO_FORWARD;
+    }
+    restServer.send(200, "application/json", "{\"status\":\"started\",\"mode\":\"" + String(manualMode ? "manual" : "auto") + "\"}");
+  });
+  restServer.on("/mode", HTTP_GET, []() {
+    setCorsHeaders();
+    if (restServer.hasArg("set")) {
+      String m = restServer.arg("set");
+      carStopped = false;
+      if (m == "auto") {
+        manualMode = false;
+        autoState = AUTO_FORWARD;
+      } else {
+        manualMode = true;
+        autoState = AUTO_STOPPED;
+        stopCar();
+      }
+    }
+    restServer.send(200, "application/json", "{\"mode\":\"" + String(manualMode ? "manual" : "auto") + "\"}");
+  });
+  restServer.on("/move", HTTP_GET, []() {
+    setCorsHeaders();
+    if (!manualMode || carStopped) {
+      restServer.send(200, "application/json", "{\"status\":\"blocked\"}");
+      return;
+    }
+    if (restServer.hasArg("d")) {
+      char dir = restServer.arg("d").charAt(0);
+      int spd = restServer.hasArg("speed") ? restServer.arg("speed").toInt() : CRUISE_SPEED_PWM;
+      if (spd <= 0) spd = CRUISE_SPEED_PWM;
+      if (dir == 'F') { motorWrite(MOTOR_IN1, MOTOR_IN2, spd); motorWrite(MOTOR_IN3, MOTOR_IN4, spd); }
+      else if (dir == 'B') { motorWrite(MOTOR_IN1, MOTOR_IN2, -spd); motorWrite(MOTOR_IN3, MOTOR_IN4, -spd); }
+      else if (dir == 'L') { motorWrite(MOTOR_IN1, MOTOR_IN2, -spd); motorWrite(MOTOR_IN3, MOTOR_IN4, spd); }
+      else if (dir == 'R') { motorWrite(MOTOR_IN1, MOTOR_IN2, spd); motorWrite(MOTOR_IN3, MOTOR_IN4, -spd); }
+      else if (dir == 'S') { stopCar(); }
+      lastDriveCmdMs = millis();
+      motorRunning = (dir != 'S');
+      restServer.send(200, "application/json", "{\"status\":\"ok\"}");
+    } else {
+      restServer.send(400, "text/plain", "Missing d parameter");
+    }
+  });
+  restServer.on("/rotate", HTTP_GET, []() {
+    setCorsHeaders();
+    if (!manualMode || carStopped) {
+      restServer.send(200, "application/json", "{\"status\":\"blocked\"}");
+      return;
+    }
+    String dir = restServer.arg("dir");
+    if (dir == "left") turnByGyro(90.0f, false);
+    else if (dir == "right") turnByGyro(90.0f, true);
+    else if (dir == "360") turnByGyro(360.0f, true);
+    restServer.send(200, "application/json", "{\"status\":\"ok\"}");
+  });
+  restServer.on("/led", HTTP_GET, []() {
+    setCorsHeaders();
+    String eff = restServer.arg("effect");
+    if (eff == "blink" || eff == "warn" || eff == "pulse") currentLedEffect = eff;
+    else currentLedEffect = "off";
+    lastLedUpdateMs = millis();
+    updateLEDs();
+    restServer.send(200, "application/json", "{\"status\":\"ok\",\"effect\":\"" + currentLedEffect + "\"}");
+  });
+  restServer.on("/scan", HTTP_GET, []() {
+    setCorsHeaders();
+    radarState = SCAN_RUNNING;
+    radarCurrentAngle = -90;
+    radarStepDir = 1;
+    radarServo.attach(SERVO_PIN, 500, 2400);
+    lastRadarStepMs = millis();
+    restServer.send(200, "application/json", "{\"status\":\"scanning\"}");
+  });
+  restServer.on("/scanResult", HTTP_GET, []() {
+    setCorsHeaders();
+    String res = "{\"status\":\"" + String(radarState == SCAN_DONE ? "done" : (radarState == SCAN_RUNNING ? "scanning" : "idle")) + "\"";
+    res += ",\"left\":" + String(scanDistLeft);
+    res += ",\"front\":" + String(scanDistFront);
+    res += ",\"right\":" + String(scanDistRight);
+    res += "}";
+    restServer.send(200, "application/json", res);
+  });
   restServer.on("/ota/status", handleFirmwareInfo);
   restServer.on("/ota/update", HTTP_POST, handleOtaFinish, handleOtaUpload);
 
@@ -1115,7 +1229,12 @@ void setup() {
   // Initialize OV7670 camera
   cameraAvailable = initCamera();
 
-  Serial.println("[NovaX V2] System Ready!");
+  // DEFAULT POWER-ON STATE: Manual mode, autonomous stopped, motors zeroed
+  manualMode = true;
+  autoState = AUTO_STOPPED;
+  stopCar();
+
+  Serial.println("[NovaX V2] System Ready in Manual Mode!");
 }
 
 void loop() {
@@ -1152,6 +1271,8 @@ void loop() {
     telem += "\"heading\":" + String(yawHeading, 1) + ",";
     telem += "\"battery\":3.95,";
     telem += "\"mode\":\"" + String(manualMode ? "manual" : "auto") + "\",";
+    telem += "\"stopped\":" + String(carStopped || autoState == AUTO_STOPPED ? "true" : "false") + ",";
+    telem += "\"version\":\"" + String(FIRMWARE_VERSION) + "\",";
     telem += "\"camera\":" + String(cameraAvailable ? "true" : "false") + ",";
     telem += "\"wifiMode\":\"" + wifiMode + "\",";
     telem += "\"ip\":\"" + ip + "\",";

@@ -18,6 +18,7 @@ let camOn = false;
 let isConnected = false;
 let sonarEnabled = true;
 let currentMode = 'manual';
+let isCarStopped = false;
 
 // DOM Helpers
 const $ = (id) => document.getElementById(id);
@@ -201,12 +202,93 @@ function sendWs(payload) {
   return false;
 }
 
+// ================= AUTO MODE UI LOCK & STOP/START STATE =================
+function applyAutoModeUi(isAuto) {
+  // Movement and manual controls that MUST be disabled in Auto mode
+  const disabledSelectors = [
+    '#dpadUp', '#dpadDown', '#dpadLeft', '#dpadRight', '#stop',
+    '#drawModeBtn', '#clearBtn', '#sendPathBtn', '#drawCanvas',
+    '#rotLBtn', '#rotRBtn', '#rot360Btn',
+    '#scanBtn', '#servoLeftBtn', '#servoRightBtn'
+  ];
+
+  disabledSelectors.forEach(sel => {
+    const el = document.querySelector(sel);
+    if (!el) return;
+    if (isAuto) {
+      el.classList.add('auto-locked');
+      el.setAttribute('disabled', 'true');
+      el.setAttribute('tabindex', '-1');
+    } else {
+      el.classList.remove('auto-locked');
+      el.removeAttribute('disabled');
+      el.removeAttribute('tabindex');
+    }
+  });
+
+  const modeBtn = $('modeToggleBtn');
+  if (modeBtn) {
+    if (isAuto) {
+      modeBtn.textContent = 'AUTO';
+      modeBtn.className = 'hero-btn active-auto-mode';
+      modeBtn.title = 'Car in Autonomous Navigation Mode. Tap to switch to MANUAL.';
+    } else {
+      modeBtn.textContent = 'MANUAL';
+      modeBtn.className = 'hero-btn hero-blue';
+      modeBtn.title = 'Car in Manual Driver Mode. Tap to switch to AUTO.';
+    }
+  }
+}
+
+function setCarStoppedState(stopped) {
+  isCarStopped = stopped;
+  const btn = $('centerStopBtn');
+  if (btn) {
+    if (stopped) {
+      btn.textContent = 'START';
+      btn.className = 'hero-btn hero-green';
+      btn.title = currentMode === 'auto' ? 'Resume Autonomous Driving' : 'Start Motors / Drive Ready';
+    } else {
+      btn.textContent = 'STOP';
+      btn.className = 'hero-btn hero-red';
+      btn.title = 'Emergency Stop';
+    }
+  }
+}
+
+async function startCar() {
+  vibrate(25);
+  setCarStoppedState(false);
+  const sent = sendWs({ type: 'start' });
+  if (!sent) {
+    await api('/start', { method: 'POST' }).catch(() => {});
+  }
+}
+
 // Inbound WebSocket Message Router
 function handleWsPayload(data) {
   if (!data || !data.type) return;
 
   switch (data.type) {
     case 'telemetry':
+      // Running ESP32 firmware version
+      if (data.version) {
+        if ($('fwVerHeader')) $('fwVerHeader').textContent = `ESP v${data.version}`;
+        if ($('fwVersionVal')) $('fwVersionVal').textContent = `v${data.version}`;
+      }
+
+      // Stopped state
+      if (data.stopped !== undefined) {
+        const stopped = (data.stopped === true || data.stopped === 1 || data.stopped === 'true');
+        setCarStoppedState(stopped);
+      }
+
+      // Robot mode (manual / auto)
+      if (data.mode) {
+        currentMode = data.mode === 'auto' ? 'auto' : 'manual';
+        applyAutoModeUi(currentMode === 'auto');
+      }
+
       // Ultrasonic Front Distance
       if (data.distance !== undefined && $('radarDistVal')) {
         $('radarDistVal').textContent = data.distance;
@@ -218,19 +300,31 @@ function handleWsPayload(data) {
         bat.textContent = `${Number(data.battery).toFixed(2)}V`;
       }
 
-      // Robot mode (manual / auto)
-      if (data.mode) {
-        currentMode = data.mode === 'auto' ? 'auto' : 'manual';
-        const modeBtn = $('modeToggleBtn');
-        if (modeBtn) {
-          modeBtn.textContent = currentMode.toUpperCase();
-          modeBtn.className = `hero-btn ${currentMode === 'manual' ? 'hero-blue' : 'hero-red'}`;
-        }
-      }
-
       // Wi-Fi info in settings
       if (data.wifiMode && $('wifiModeVal')) $('wifiModeVal').textContent = data.wifiMode;
       if (data.ip && $('wifiIpVal')) $('wifiIpVal').textContent = data.ip;
+      break;
+
+    case 'status':
+      if (data.version) {
+        if ($('fwVerHeader')) $('fwVerHeader').textContent = `ESP v${data.version}`;
+        if ($('fwVersionVal')) $('fwVersionVal').textContent = `v${data.version}`;
+      }
+      break;
+
+    case 'stopped':
+      setCarStoppedState(true);
+      break;
+
+    case 'started':
+      setCarStoppedState(false);
+      break;
+
+    case 'mode':
+      if (data.value) {
+        currentMode = data.value === 'auto' ? 'auto' : 'manual';
+        applyAutoModeUi(currentMode === 'auto');
+      }
       break;
 
     case 'radar':
@@ -275,17 +369,6 @@ function handleWsPayload(data) {
         $('radarDistVal').textContent = data.distance;
       }
       break;
-
-    case 'mode':
-      if (data.value) {
-        currentMode = data.value;
-        const modeBtn = $('modeToggleBtn');
-        if (modeBtn) {
-          modeBtn.textContent = currentMode.toUpperCase();
-          modeBtn.className = `hero-btn ${currentMode === 'manual' ? 'hero-blue' : 'hero-red'}`;
-        }
-      }
-      break;
   }
 }
 
@@ -313,19 +396,23 @@ async function updateStatus() {
     }
 
     // Robot mode
-    currentMode = data.mode ? 'manual' : 'auto';
-    const modeBtn = $('modeToggleBtn');
-    if (modeBtn) {
-      modeBtn.textContent = currentMode.toUpperCase();
-      modeBtn.className = `hero-btn ${currentMode === 'manual' ? 'hero-blue' : 'hero-red'}`;
+    currentMode = (data.mode === 'auto' || data.mode === 0 || data.manual === 0) ? 'auto' : 'manual';
+    applyAutoModeUi(currentMode === 'auto');
+
+    // Stopped state
+    if (data.stopped !== undefined) {
+      setCarStoppedState(data.stopped === true || data.stopped === 1);
     }
 
     // Wi-Fi Info in Settings
     if (data.wifiMode && $('wifiModeVal')) $('wifiModeVal').textContent = data.wifiMode;
     if (data.ip && $('wifiIpVal')) $('wifiIpVal').textContent = data.ip;
-    if (data.version) {
-      if ($('fwVersionVal')) $('fwVersionVal').textContent = data.version;
-      if ($('fwVerHeader')) $('fwVerHeader').textContent = data.version;
+
+    // ESP32 Running Firmware Version
+    if (data.version || data.firmware) {
+      const ver = data.version || data.firmware;
+      if ($('fwVersionVal')) $('fwVersionVal').textContent = `v${ver}`;
+      if ($('fwVerHeader')) $('fwVerHeader').textContent = `ESP v${ver}`;
     }
   } catch (err) {
     if (!wsConnected) {
@@ -339,6 +426,12 @@ let moveInterval = null;
 let currentMoveCmd = 'S';
 
 async function sendMove(cmd, speed = 180) {
+  // If in AUTO mode, lock user driving controls completely
+  if (currentMode === 'auto') return;
+
+  // When car is in STOPPED state, driving is blocked until START button is pressed!
+  if (isCarStopped && cmd !== 'S') return;
+
   currentMoveCmd = cmd;
 
   // 1. Primary: Send via WebSocket text frame
@@ -360,6 +453,7 @@ $$('[data-move]').forEach((btn) => {
   const dir = btn.dataset.move;
 
   const startDrive = (e) => {
+    if (currentMode === 'auto') return;
     e.preventDefault();
     vibrate(18);
     btn.classList.add('active');
@@ -371,6 +465,7 @@ $$('[data-move]').forEach((btn) => {
   };
 
   const stopDrive = (e) => {
+    if (currentMode === 'auto') return;
     e.preventDefault();
     btn.classList.remove('active');
     clearInterval(moveInterval);
@@ -383,21 +478,32 @@ $$('[data-move]').forEach((btn) => {
   );
 });
 
-// Emergency Stop Buttons (Dual-Channel: WS + HTTP)
-const stopCar = () => {
+// Emergency Stop / Start Buttons (Dual-Channel: WS + HTTP)
+const stopCar = async () => {
   vibrate(35);
   clearInterval(moveInterval);
   currentMoveCmd = 'S';
+  setCarStoppedState(true);
 
   // Primary: WS stop frame
   sendWs({ type: 'stop' });
 
   // Dual Fallback: Immediate HTTP stop endpoint
-  api('/stop').catch(() => {});
+  api('/stop', { method: 'POST' }).catch(() => {});
 };
 
 if ($('stop')) $('stop').onclick = stopCar;
-if ($('centerStopBtn')) $('centerStopBtn').onclick = stopCar;
+
+// Center STOP / START Button Toggle
+if ($('centerStopBtn')) {
+  $('centerStopBtn').onclick = () => {
+    if (isCarStopped) {
+      startCar();
+    } else {
+      stopCar();
+    }
+  };
+}
 
 // Autonomous / Manual Mode Toggle
 if ($('modeToggleBtn')) {
@@ -410,14 +516,17 @@ if ($('modeToggleBtn')) {
       await api(`/mode?set=${target}`).catch(() => {});
     }
     currentMode = target;
-    $('modeToggleBtn').textContent = currentMode.toUpperCase();
-    $('modeToggleBtn').className = `hero-btn ${currentMode === 'manual' ? 'hero-blue' : 'hero-red'}`;
+    applyAutoModeUi(currentMode === 'auto');
+    if (currentMode === 'auto') {
+      setCarStoppedState(false);
+    }
   };
 }
 
 // Tactical Gyroscope Rotations (MPU6050 Assisted)
 if ($('rotLBtn')) {
   $('rotLBtn').onclick = () => {
+    if (currentMode === 'auto' || isCarStopped) return;
     vibrate(20);
     if (!sendWs({ type: 'rotate', dir: 'left' })) {
       api('/rotate?dir=left').catch(() => {});
@@ -427,6 +536,7 @@ if ($('rotLBtn')) {
 
 if ($('rotRBtn')) {
   $('rotRBtn').onclick = () => {
+    if (currentMode === 'auto' || isCarStopped) return;
     vibrate(20);
     if (!sendWs({ type: 'rotate', dir: 'right' })) {
       api('/rotate?dir=right').catch(() => {});
@@ -436,6 +546,7 @@ if ($('rotRBtn')) {
 
 if ($('rot360Btn')) {
   $('rot360Btn').onclick = () => {
+    if (currentMode === 'auto' || isCarStopped) return;
     vibrate(25);
     if (!sendWs({ type: 'rotate', dir: '360' })) {
       api('/rotate?dir=360').catch(() => {});
@@ -527,6 +638,7 @@ if (canvas) {
 // Toggle between D-Pad and Canvas
 if ($('drawModeBtn')) {
   $('drawModeBtn').onclick = () => {
+    if (currentMode === 'auto') return;
     vibrate(20);
     isDrawMode = !isDrawMode;
 
@@ -619,6 +731,7 @@ if ($('sendPathBtn')) {
 // ================= RADAR SWEEPER & SONAR =================
 if ($('scanBtn')) {
   $('scanBtn').onclick = async () => {
+    if (currentMode === 'auto') return;
     vibrate(30);
     if ($('radarStatusTag')) $('radarStatusTag').textContent = 'SCANNING';
 
@@ -662,6 +775,7 @@ if ($('scanBtn')) {
 let currentServoAngle = 90; // Default center 90° (0° = Left, 180° = Right)
 
 function setServoAngle(angle) {
+  if (currentMode === 'auto') return;
   angle = Math.max(0, Math.min(180, angle));
   currentServoAngle = angle;
 
@@ -676,6 +790,7 @@ function setServoAngle(angle) {
 
 if ($('servoLeftBtn')) {
   $('servoLeftBtn').onclick = () => {
+    if (currentMode === 'auto') return;
     vibrate(15);
     setServoAngle(currentServoAngle - 15);
   };
@@ -683,6 +798,7 @@ if ($('servoLeftBtn')) {
 
 if ($('servoRightBtn')) {
   $('servoRightBtn').onclick = () => {
+    if (currentMode === 'auto') return;
     vibrate(15);
     setServoAngle(currentServoAngle + 15);
   };
@@ -1116,7 +1232,7 @@ async function hotUpdateApp(force = false) {
     if (!appMarkup || appMarkup.length < 500) {
       throw new Error('Downloaded UI template is incomplete or missing #app container.');
     }
-    if (!appMarkup.includes('cockpit-grid') || !appMarkup.includes('dpadUp')) {
+    if ((!appMarkup.includes('cockpit-container') && !appMarkup.includes('cockpit-grid')) || !appMarkup.includes('dpadUp')) {
       throw new Error('Integrity check failed: missing required cockpit elements.');
     }
 

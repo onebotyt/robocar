@@ -44,7 +44,7 @@
       <div class="top-brand">
         <span class="brand-dot" id="liveDot"></span>
         <span class="brand-name">NOVA-X</span>
-        <span class="brand-ver" id="fwVerHeader">V2.3</span>
+        <span class="brand-ver" id="fwVerHeader" title="ESP32 Running Firmware Version">ESP --</span>
         <span class="comm-badge" id="commBadge" title="Protocol Link">OFF</span>
       </div>
 
@@ -92,23 +92,23 @@
           <!-- D-PAD VIEW (DEFAULT) -->
           <div id="dpadView" class="dpad-wrapper">
             <div class="dpad-grid">
-              <button class="dpad-btn dpad-teal dpad-up" data-move="F" aria-label="Forward">
+              <button class="dpad-btn dpad-teal dpad-up" id="dpadUp" data-move="F" aria-label="Forward">
                 <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 4l-8 8h16z"/></svg>
               </button>
               
               <div class="dpad-mid-row">
-                <button class="dpad-btn dpad-teal dpad-left" data-move="L" aria-label="Left">
+                <button class="dpad-btn dpad-teal dpad-left" id="dpadLeft" data-move="L" aria-label="Left">
                   <svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 12l8-8v16z"/></svg>
                 </button>
                 <button class="dpad-btn dpad-red dpad-center-stop" id="stop" aria-label="Stop">
                   <div class="stop-box-icon"></div>
                 </button>
-                <button class="dpad-btn dpad-teal dpad-right" data-move="R" aria-label="Right">
+                <button class="dpad-btn dpad-teal dpad-right" id="dpadRight" data-move="R" aria-label="Right">
                   <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 12l-8-8v16z"/></svg>
                 </button>
               </div>
 
-              <button class="dpad-btn dpad-teal dpad-down" data-move="B" aria-label="Reverse">
+              <button class="dpad-btn dpad-teal dpad-down" id="dpadDown" data-move="B" aria-label="Reverse">
                 <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 20l8-8H4z"/></svg>
               </button>
             </div>
