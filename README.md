@@ -2,12 +2,20 @@
 
 > **High-performance mobile phone controller for the NovaX ESP32 robot car.**
 
-[![Download Android APK](https://img.shields.io/badge/Download-Android%20APK%20(Direct)-brightgreen?style=for-the-badge&logo=android)](https://github.com/onebotyt/robocar/raw/main/apk/NovaX-Controller.apk)
-[![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-Auto%20Build%20APK-blue?style=for-the-badge&logo=githubactions)](https://github.com/onebotyt/robocar/actions)
+---
 
-### 📲 [👉 Click here to directly download NovaX-Controller.apk](https://github.com/onebotyt/robocar/raw/main/apk/NovaX-Controller.apk)
+### 📥 Download Android Native App (.apk)
 
-The ready-to-install Android APK is compiled by GitHub Actions and saved directly inside this repository folder under [`apk/NovaX-Controller.apk`](apk/NovaX-Controller.apk).
+| Direct Download Link | GitHub Repository Location | Build Status |
+| :--- | :--- | :--- |
+| [**📲 Download NovaX-Controller.apk (Direct)**](https://github.com/onebotyt/robocar/raw/main/apk/NovaX-Controller.apk) | [`apk/NovaX-Controller.apk`](apk/NovaX-Controller.apk) | [![Build NovaX Android APK](https://github.com/onebotyt/robocar/actions/workflows/build-apk.yml/badge.svg)](https://github.com/onebotyt/robocar/actions/workflows/build-apk.yml) |
+
+#### ⚡ Quick Phone Installation (30 Seconds):
+1. **[👉 Click here to directly download the .apk to your Android phone](https://github.com/onebotyt/robocar/raw/main/apk/NovaX-Controller.apk)**
+2. Tap the downloaded `NovaX-Controller.apk` file.
+3. If prompted by Android, tap **Settings** and toggle ON **"Allow from this source"**.
+4. Tap **Install** and launch **NovaX Controller**!
+5. Connect your phone's Wi-Fi to the robot car AP: `NovaX-Car` (Password: `12345678`).
 
 ---
 
