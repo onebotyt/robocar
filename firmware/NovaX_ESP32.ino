@@ -10,8 +10,13 @@
 #include <WebServer.h>
 #include <ESP32Servo.h>
 #include <Wire.h>
+
+// Resolve typedef conflict between Adafruit_Sensor and esp32-camera
+#define sensor_t adafruit_sensor_t
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
+#undef sensor_t
+
 #include <esp_camera.h>
 #include <img_converters.h>
 #include <Preferences.h>
