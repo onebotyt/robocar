@@ -2,6 +2,12 @@
 
 > **High-performance mobile phone controller for the NovaX ESP32 robot car.**
 
+[![Live Web Cockpit](https://img.shields.io/badge/Live%20Demo-GitHub%20Pages-00bfa5?style=for-the-badge&logo=googlechrome)](https://onebotyt.github.io/robocar/)
+[![Download Android APK](https://img.shields.io/badge/Download-Android%20APK%20(Direct)-brightgreen?style=for-the-badge&logo=android)](https://github.com/onebotyt/robocar/raw/main/apk/NovaX-Controller.apk)
+[![Build NovaX Android APK](https://github.com/onebotyt/robocar/actions/workflows/build-apk.yml/badge.svg)](https://github.com/onebotyt/robocar/actions/workflows/build-apk.yml)
+
+### 🌐 [👉 Click here to test Live Web Cockpit UI](https://onebotyt.github.io/robocar/)
+
 ---
 
 ### 📥 Download Android Native App (.apk)

@@ -40,8 +40,10 @@ jobs:
       - name: Make Gradlew Executable
         run: chmod +x android/gradlew
 
-      - name: Sync Capacitor
-        run: npx cap sync android
+      - name: Sync Web Assets & Capacitor
+        run: |
+          cp index.html style.css app.js icon* manifest.webmanifest sw.js version.json pwa/
+          npx cap sync android
 
       - name: Build Debug APK
         working-directory: android
