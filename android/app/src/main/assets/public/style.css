@@ -415,9 +415,8 @@ html, body {
   margin-top: 10px;
 }
 
-/* ================= 2. CENTER CARD: NOVA X ================= */
+/* ================= 2. CENTER CARD: NOVA X (LIVE CAM & CONTROLS) ================= */
 .card-center {
-  text-align: center;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -425,32 +424,46 @@ html, body {
 
 .card-hero-title {
   font-family: var(--font-hero);
-  font-size: 1.55rem;
+  font-size: 1.25rem;
   font-weight: 800;
-  letter-spacing: 2px;
+  letter-spacing: 1.5px;
   color: #ffffff;
-  margin-bottom: 2px;
 }
 
-.hero-status-row {
+/* Center Live Camera Container */
+.center-cam-wrapper {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  gap: 8px;
+  margin: 6px 0 10px 0;
+  flex: 1;
   justify-content: center;
-  gap: 16px;
-  font-size: 0.75rem;
-  color: var(--text-dim);
-  margin-bottom: 10px;
 }
-.hero-status-row b { color: var(--text-main); }
-.status-red { color: var(--color-red) !important; }
-.status-green { color: #10b981 !important; }
+
+.center-cam-wrapper .cam-feed-container {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  min-height: 140px;
+  max-height: 180px;
+  background: #02070d;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  position: relative;
+}
+
+.cam-action-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
 
 /* Hero Mode & Stop Row */
 .hero-actions-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
-  margin-bottom: 12px;
+  margin-top: 4px;
 }
 
 .hero-btn {

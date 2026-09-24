@@ -49,11 +49,6 @@
 
       <!-- Quick Action Badges -->
       <div class="top-actions">
-        <button class="top-btn" id="openCamModalBtn" title="Live Camera Feed">
-          <span class="btn-ic">📷</span>
-          <span class="btn-tx">Camera</span>
-        </button>
-
         <button class="top-btn" id="openSettingsModalBtn" title="Wi-Fi, OTA & App Updates">
           <span class="btn-ic">⚙️</span>
           <span class="btn-tx">Settings</span>
@@ -141,14 +136,29 @@
         </div>
       </section>
 
-      <!-- ================= 2. NOVA X CENTER CARD ================= -->
+      <!-- ================= 2. NOVA X CENTER CARD (LIVE CAMERA & CONTROLS) ================= -->
       <section class="card card-center">
-        <h1 class="card-hero-title">NOVA X</h1>
+        <div class="card-header-simple">
+          <span class="card-hero-title">NOVA X</span>
+          <span class="card-mode-tag" id="camStateBadge">CAM OFF</span>
+        </div>
 
-        <!-- Status & Telemetry Row -->
-        <div class="hero-status-row">
-          <div class="status-item">Battery: <b id="batteryStat">--%</b></div>
-          <div class="status-item">Status: <b id="connStatusStat" class="status-red">No connection</b></div>
+        <!-- Live Camera Feed in Center -->
+        <div class="center-cam-wrapper">
+          <div class="cam-feed-container">
+            <img id="cam" alt="NovaX Camera Stream" class="cam-img">
+            <div id="camStandby" class="cam-standby-overlay active">
+              <div class="standby-reticle"></div>
+              <span>LIVE CAM STANDBY</span>
+            </div>
+            <div class="cam-info-bar">
+              <span>FPS: <b id="camFpsVal">0</b></span>
+            </div>
+          </div>
+          <div class="cam-action-row">
+            <button id="camToggleBtn" class="pill-btn blue">Camera ON</button>
+            <button id="camSnapBtn" class="pill-btn">Snapshot</button>
+          </div>
         </div>
 
         <!-- Mode & Stop Row -->
@@ -156,30 +166,9 @@
           <button id="modeToggleBtn" class="hero-btn hero-blue">MANUAL</button>
           <button id="centerStopBtn" class="hero-btn hero-red">STOP</button>
         </div>
-
-        <!-- Rotation Section -->
-        <div class="control-group">
-          <div class="group-title">Rotation</div>
-          <div class="pill-row">
-            <button id="rotLBtn" class="pill-btn">Rotate L</button>
-            <button id="rotRBtn" class="pill-btn">Rotate R</button>
-            <button id="rot360Btn" class="pill-btn blue">360°</button>
-          </div>
-        </div>
-
-        <!-- LEDs Section -->
-        <div class="control-group">
-          <div class="group-title">LEDs</div>
-          <div class="pill-row">
-            <button class="pill-btn active" data-led="off">Off</button>
-            <button class="pill-btn" data-led="blink">Blink</button>
-            <button class="pill-btn" data-led="warn">Warn</button>
-            <button class="pill-btn" data-led="pulse">Pulse</button>
-          </div>
-        </div>
       </section>
 
-      <!-- ================= 3. RADAR CARD ================= -->
+      <!-- ================= 3. RADAR & AUXILIARY CONTROLS CARD ================= -->
       <section class="card card-radar">
         <div class="card-header-simple">
           <span class="card-title">Radar</span>
@@ -213,36 +202,30 @@
           <button id="scanBtn" class="pill-btn blue">Scan</button>
           <button id="sonarToggleBtn" class="pill-btn active">Sonar ON</button>
         </div>
+
+        <!-- Rotation Section (Moved Below Radar) -->
+        <div class="control-group">
+          <div class="group-title">Rotation</div>
+          <div class="pill-row">
+            <button id="rotLBtn" class="pill-btn">Rotate L</button>
+            <button id="rotRBtn" class="pill-btn">Rotate R</button>
+            <button id="rot360Btn" class="pill-btn blue">360°</button>
+          </div>
+        </div>
+
+        <!-- LEDs Section (Moved Below Radar) -->
+        <div class="control-group">
+          <div class="group-title">LEDs</div>
+          <div class="pill-row">
+            <button class="pill-btn active" data-led="off">Off</button>
+            <button class="pill-btn" data-led="blink">Blink</button>
+            <button class="pill-btn" data-led="warn">Warn</button>
+            <button class="pill-btn" data-led="pulse">Pulse</button>
+          </div>
+        </div>
       </section>
 
     </main>
-
-    <!-- LIVE CAMERA MODAL DIALOG -->
-    <div id="cameraModal" class="modal-backdrop" style="display:none;">
-      <div class="modal-box cam-modal-box">
-        <div class="modal-top">
-          <h3>LIVE CAMERA (OV7670)</h3>
-          <button class="modal-close-x" id="closeCamModal">&times;</button>
-        </div>
-
-        <div class="cam-feed-container">
-          <img id="cam" alt="NovaX Camera Stream" class="cam-img">
-          <div id="camStandby" class="cam-standby-overlay active">
-            <div class="standby-reticle"></div>
-            <span>CAMERA STANDBY</span>
-          </div>
-          <div class="cam-info-bar">
-            <span>FPS: <b id="camFpsVal">0</b></span>
-            <span id="camStateBadge">OFF</span>
-          </div>
-        </div>
-
-        <div class="modal-btn-row">
-          <button id="camToggleBtn" class="pill-btn blue">Camera ON</button>
-          <button id="camSnapBtn" class="pill-btn">Snapshot</button>
-        </div>
-      </div>
-    </div>
 
     <!-- SETTINGS, WI-FI & GITHUB UPDATES MODAL -->
     <div id="settingsModal" class="modal-backdrop" style="display:none;">

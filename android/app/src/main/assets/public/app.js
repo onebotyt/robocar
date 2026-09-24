@@ -50,16 +50,19 @@ const jsonApi = async (path, options = {}) => {
 function setConnectionState(online) {
   isConnected = online;
   const dot = $('liveDot');
+  if (dot) {
+    if (online) dot.classList.add('online');
+    else dot.classList.remove('online');
+  }
   const statusEl = $('connStatusStat');
-
-  if (online) {
-    dot.classList.add('online');
-    statusEl.textContent = 'Connected';
-    statusEl.className = 'status-green';
-  } else {
-    dot.classList.remove('online');
-    statusEl.textContent = 'No connection';
-    statusEl.className = 'status-red';
+  if (statusEl) {
+    if (online) {
+      statusEl.textContent = 'Connected';
+      statusEl.className = 'status-green';
+    } else {
+      statusEl.textContent = 'No connection';
+      statusEl.className = 'status-red';
+    }
   }
 }
 
@@ -69,12 +72,13 @@ async function updateStatus() {
     setConnectionState(true);
 
     // Distance in Radar
-    if (data.distance !== undefined && data.distance !== null) {
+    if (data.distance !== undefined && data.distance !== null && $('radarDistVal')) {
       $('radarDistVal').textContent = data.distance;
     }
 
-    // Battery / Ping estimate
-    $('batteryStat').textContent = '98%';
+    // Battery / Ping estimate (if present in DOM)
+    const bat = $('batteryStat');
+    if (bat) bat.textContent = '98%';
 
     // Mode
     currentMode = data.mode ? 'manual' : 'auto';
@@ -327,13 +331,17 @@ let camTimer = null;
 let camFrameCount = 0;
 let lastFpsTime = performance.now();
 
-$('openCamModalBtn').onclick = () => {
-  $('cameraModal').style.display = 'flex';
-};
+if ($('openCamModalBtn') && $('cameraModal')) {
+  $('openCamModalBtn').onclick = () => {
+    $('cameraModal').style.display = 'flex';
+  };
+}
 
-$('closeCamModal').onclick = () => {
-  $('cameraModal').style.display = 'none';
-};
+if ($('closeCamModal') && $('cameraModal')) {
+  $('closeCamModal').onclick = () => {
+    $('cameraModal').style.display = 'none';
+  };
+}
 
 function fetchCamFrame() {
   if (!camOn) return;
