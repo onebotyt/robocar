@@ -23,13 +23,35 @@
   <!-- Dynamic In-App Hot Update Loader (GitHub OTA) -->
   <script>
     (function() {
+      // BUNDLE_VERSION must match CURRENT_APP_VERSION in app.js
+      var BUNDLE_VERSION = '2.4.0';
+      function _verGT(a, b) {
+        var pa = (a||'').split('.').map(Number);
+        var pb = (b||'').split('.').map(Number);
+        for (var i = 0; i < Math.max(pa.length, pb.length); i++) {
+          var d = (pa[i]||0) - (pb[i]||0);
+          if (d !== 0) return d > 0;
+        }
+        return false;
+      }
       try {
-        var hotCss = localStorage.getItem('novax_hot_css');
-        if (hotCss) {
-          var s = document.createElement('style');
-          s.id = 'novaxHotStyle';
-          s.textContent = hotCss;
-          document.head.appendChild(s);
+        var hotVer = localStorage.getItem('novax_hot_version') || '';
+        // Only apply hot cache if the cached version is STRICTLY NEWER than the bundle.
+        // If equal or older, clear stale cache so the fresh bundled assets are used.
+        if (!_verGT(hotVer, BUNDLE_VERSION)) {
+          localStorage.removeItem('novax_hot_css');
+          localStorage.removeItem('novax_hot_html');
+          localStorage.removeItem('novax_hot_js');
+          localStorage.removeItem('novax_hot_version');
+          console.log('[NovaX] Stale hot-cache cleared. Bundle v' + BUNDLE_VERSION + ' will be used.');
+        } else {
+          var hotCss = localStorage.getItem('novax_hot_css');
+          if (hotCss) {
+            var s = document.createElement('style');
+            s.id = 'novaxHotStyle';
+            s.textContent = hotCss;
+            document.head.appendChild(s);
+          }
         }
       } catch (e) {}
     })();
@@ -324,51 +346,65 @@
   <!-- Dynamic In-App Hot JS Loader with Automatic Bundled Fallback -->
   <script>
     (function() {
-      // 1. Hot HTML Injection: If updated UI was downloaded from GitHub, rehydrate #app
-      try {
-        var hotHtml = localStorage.getItem('novax_hot_html');
-        if (hotHtml && hotHtml.length > 200) {
-          var appEl = document.getElementById('app');
-          if (appEl) {
-            appEl.outerHTML = hotHtml;
-          }
+      var BUNDLE_VERSION = '2.4.0';
+      function _verGT(a, b) {
+        var pa = (a||'').split('.').map(Number);
+        var pb = (b||'').split('.').map(Number);
+        for (var i = 0; i < Math.max(pa.length, pb.length); i++) {
+          var d = (pa[i]||0) - (pb[i]||0);
+          if (d !== 0) return d > 0;
         }
-      } catch (e) {
-        console.warn('Hot HTML rehydration bypassed:', e);
+        return false;
+      }
+
+      var hotVer = '';
+      try { hotVer = localStorage.getItem('novax_hot_version') || ''; } catch(e) {}
+
+      var useHot = _verGT(hotVer, BUNDLE_VERSION);
+
+      // 1. Hot HTML Injection (only if hot cache is strictly newer than bundle)
+      if (useHot) {
+        try {
+          var hotHtml = localStorage.getItem('novax_hot_html');
+          if (hotHtml && hotHtml.length > 200) {
+            var appEl = document.getElementById('app');
+            if (appEl) appEl.outerHTML = hotHtml;
+          }
+        } catch (e) {
+          console.warn('Hot HTML rehydration bypassed:', e);
+        }
       }
 
       // 2. Hot JS Loader
-      var hotJs = null;
-      try {
-        hotJs = localStorage.getItem('novax_hot_js');
-      } catch (e) {}
-
-      if (hotJs && hotJs.length > 500) {
-        try {
-          var s = document.createElement('script');
-          s.id = 'novaxHotScript';
-          s.textContent = hotJs;
-          // Safety error listener to detect immediate evaluation crash
-          window.addEventListener('error', function onHotErr(ev) {
-            console.error('NovaX Hot script error detected. Rolling back to bundled app.js:', ev);
-            try {
-              localStorage.removeItem('novax_hot_js');
-              localStorage.removeItem('novax_hot_css');
-              localStorage.removeItem('novax_hot_html');
-              localStorage.removeItem('novax_hot_version');
-            } catch (ex) {}
-            window.removeEventListener('error', onHotErr);
-            window.location.reload();
-          }, { once: true });
-          document.body.appendChild(s);
-          return;
-        } catch (err) {
-          console.warn('Hot script launch failed, using bundled code:', err);
+      if (useHot) {
+        var hotJs = null;
+        try { hotJs = localStorage.getItem('novax_hot_js'); } catch (e) {}
+        if (hotJs && hotJs.length > 500) {
           try {
-            localStorage.removeItem('novax_hot_js');
-          } catch (e) {}
+            var s = document.createElement('script');
+            s.id = 'novaxHotScript';
+            s.textContent = hotJs;
+            window.addEventListener('error', function onHotErr(ev) {
+              console.error('NovaX Hot script error — rolling back to bundled app.js:', ev);
+              try {
+                localStorage.removeItem('novax_hot_js');
+                localStorage.removeItem('novax_hot_css');
+                localStorage.removeItem('novax_hot_html');
+                localStorage.removeItem('novax_hot_version');
+              } catch (ex) {}
+              window.removeEventListener('error', onHotErr);
+              window.location.reload();
+            }, { once: true });
+            document.body.appendChild(s);
+            return;
+          } catch (err) {
+            console.warn('Hot script launch failed, using bundled code:', err);
+            try { localStorage.removeItem('novax_hot_js'); } catch (e) {}
+          }
         }
       }
+
+      // 3. Fallback: load bundled app.js
       var s = document.createElement('script');
       s.src = 'app.js';
       document.body.appendChild(s);
