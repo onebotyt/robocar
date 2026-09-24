@@ -3,22 +3,23 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <meta name="theme-color" content="#060b13">
+  <meta name="theme-color" content="#041017">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="NovaX">
-  <meta name="description" content="NovaX ESP32 Robot Car Mobile Controller">
+  <meta name="description" content="NovaX ESP32 Robot Car Controller">
 
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" type="image/svg+xml" href="icon.svg">
   <link rel="apple-touch-icon" href="icon-192.png">
 
-  <!-- Google Fonts: Orbitron for Sci-Fi HUD & Rajdhani for Cyber UI -->
+  <!-- Clean UI Typography -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Rajdhani:wght@600;700&display=swap" rel="stylesheet">
 
   <link rel="stylesheet" href="style.css">
+
   <!-- Dynamic In-App Hot Update Loader (GitHub OTA) -->
   <script>
     (function() {
@@ -33,624 +34,289 @@
       } catch (e) {}
     })();
   </script>
-  <title>NovaX Cockpit</title>
+  <title>NovaX Controller</title>
 </head>
 <body>
-  <div id="app" class="app-container">
-    
-    <!-- TOP CYBER HUD BAR -->
-    <header class="cyber-header">
-      <div class="brand">
-        <div class="logo-box">
-          <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polygon points="12 2 2 7 12 12 22 7 12 2" />
-            <polyline points="2 17 12 22 22 17" />
-            <polyline points="2 12 12 17 22 12" />
-          </svg>
-          <span class="status-pulse-dot" id="pulseDot"></span>
-        </div>
-        <div class="brand-text">
-          <span class="title">NOVA-X</span>
-          <span class="subtitle" id="fwVersionBadge">V2.1-OTA</span>
-        </div>
+  <div id="app" class="cockpit-app">
+
+    <!-- TOP NAVIGATION & STATUS BAR -->
+    <header class="top-nav-bar">
+      <div class="top-brand">
+        <span class="brand-dot" id="liveDot"></span>
+        <span class="brand-name">NOVA-X</span>
+        <span class="brand-ver" id="fwVerHeader">V2.2</span>
       </div>
 
-      <div class="hud-badges">
-        <!-- Live Connection Pill -->
-        <button class="badge-pill conn-badge" id="hostPillBtn" title="Tap to switch IP">
-          <span class="indicator" id="connIndicator"></span>
-          <span class="badge-text" id="connStatus">OFFLINE</span>
-          <span class="ping-tag" id="pingTag">--ms</span>
+      <!-- Quick Action Badges -->
+      <div class="top-actions">
+        <button class="top-btn" id="openCamModalBtn" title="Live Camera Feed">
+          <span class="btn-ic">📷</span>
+          <span class="btn-tx">Camera</span>
         </button>
 
-        <!-- Fullscreen Button -->
-        <button class="icon-btn" id="btnFullscreen" title="Fullscreen Toggle" aria-label="Toggle Fullscreen">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+        <button class="top-btn" id="openSettingsModalBtn" title="Wi-Fi, OTA & App Updates">
+          <span class="btn-ic">⚙️</span>
+          <span class="btn-tx">Settings</span>
+        </button>
+
+        <button class="top-icon-btn" id="fullscreenBtn" title="Fullscreen Toggle" aria-label="Fullscreen">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2">
             <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
           </svg>
         </button>
       </div>
     </header>
 
-    <!-- GITHUB APP UPDATE NOTIFICATION BANNER -->
+    <!-- GITHUB APP UPDATE BANNER -->
     <div id="appUpdateBanner" class="update-banner" style="display:none;">
       <div class="update-banner-left">
-        <span class="update-badge-icon">🚀</span>
+        <span class="update-icon">✨</span>
         <div class="update-text-box">
-          <span class="update-title" id="updateBannerTitle">NovaX Update Ready</span>
+          <span class="update-title" id="updateBannerTitle">Update Available</span>
           <span class="update-desc" id="updateBannerDesc">New version found on GitHub</span>
         </div>
       </div>
       <div class="update-banner-right">
-        <button id="bannerUpdateBtn" class="btn-banner-update">UPDATE</button>
+        <button id="bannerUpdateBtn" class="btn-update-now">UPDATE NOW</button>
         <button id="bannerDismissBtn" class="btn-banner-close">&times;</button>
       </div>
     </div>
 
-    <!-- MAIN SCROLLABLE CONTENT VIEW -->
-    <main class="cockpit-viewport">
+    <!-- MAIN 3-PANEL COCKPIT GRID -->
+    <main class="cockpit-container">
 
-      <!-- ================= TAB 1: DRIVE & COCKPIT ================= -->
-      <section id="view-drive" class="view-panel active">
-        
-        <!-- Live Camera Vision HUD -->
-        <div class="card camera-card">
-          <div class="hud-corner top-left"></div>
-          <div class="hud-corner top-right"></div>
-          <div class="hud-corner bottom-left"></div>
-          <div class="hud-corner bottom-right"></div>
-
-          <div class="camera-stream-wrapper">
-            <img id="cam" alt="NovaX Live Feed" class="cam-feed">
-            
-            <!-- Camera Off Standby Animated Visualizer -->
-            <div id="camStandby" class="cam-standby active">
-              <div class="standby-radar">
-                <div class="standby-sweep"></div>
-                <div class="standby-cross"></div>
-                <div class="standby-car-icon">
-                  <svg viewBox="0 0 40 40" fill="currentColor">
-                    <path d="M12 10 L28 10 L34 22 L32 32 L8 32 L6 22 Z" opacity="0.6"/>
-                    <circle cx="14" cy="30" r="3" fill="#00f2fe"/>
-                    <circle cx="26" cy="30" r="3" fill="#00f2fe"/>
-                    <path d="M16 16 L24 16 L22 22 L18 22 Z" fill="#00f2fe"/>
-                  </svg>
-                </div>
-              </div>
-              <span class="standby-text">CAM STANDBY</span>
-            </div>
-
-            <!-- Cyber HUD Overlay -->
-            <div class="cam-hud-overlay">
-              <div class="hud-tag top-tag">
-                <span class="rec-dot" id="recDot"></span>
-                <span id="camStateText">STANDBY</span>
-              </div>
-              <div class="reticle"></div>
-              <div class="hud-tag bottom-tag">
-                <span>FPS: <b id="camFps">0</b></span>
-                <span>OV7670</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="camera-toolbar">
-            <button id="camToggle" class="btn btn-cyber">
-              <span class="btn-icon">📷</span>
-              <span id="camToggleText">CAMERA ON</span>
-            </button>
-            <button id="snapshotBtn" class="btn btn-cyber-ghost" title="Save snapshot">
-              <span class="btn-icon">📸</span>
-              <span>SNAPSHOT</span>
-            </button>
-            <button id="modeQuickBtn" class="btn btn-cyber-mode">
-              <span class="btn-icon">⚡</span>
-              <span id="robotModeText">MANUAL</span>
-            </button>
-          </div>
+      <!-- ================= 1. CONTROLS CARD ================= -->
+      <section class="card card-controls">
+        <div class="card-header-simple">
+          <span class="card-title">Controls</span>
+          <span class="card-mode-tag" id="controlModeTag">D-PAD</span>
         </div>
 
-        <!-- Telemetry Gauges Strip -->
-        <div class="telemetry-strip">
-          <div class="tele-gauge-card proximity-card" id="proximityCard">
-            <div class="gauge-label">PROXIMITY</div>
-            <div class="gauge-val">
-              <span id="distance">--</span><span class="gauge-unit">cm</span>
-            </div>
-            <div class="proximity-meter">
-              <div class="proximity-bar" id="proximityBar"></div>
-            </div>
-            <div class="proximity-status" id="proximityStatus">SAFE</div>
-          </div>
-
-          <div class="tele-gauge-card heading-card">
-            <div class="gauge-label">HEADING / YAW</div>
-            <div class="gauge-val">
-              <span id="yaw">0.0</span><span class="gauge-unit">°</span>
-            </div>
-            <div class="mini-compass-wrap">
-              <div class="mini-compass-dial" id="compassDial">
-                <div class="compass-arrow"></div>
-              </div>
-            </div>
-            <div class="proximity-status">MPU6050</div>
-          </div>
-        </div>
-
-        <!-- Drive Control Selector -->
-        <div class="drive-console-card">
-          <div class="console-header">
-            <span class="console-title">DRIVE CONSOLE</span>
-            <div class="control-tabs">
-              <button class="ctrl-tab active" id="tabDpad">D-PAD</button>
-              <button class="ctrl-tab" id="tabJoy">JOYSTICK</button>
-            </div>
-          </div>
-
-          <!-- D-PAD CONTROLLER -->
-          <div id="dpadContainer" class="dpad-box">
+        <div class="controls-display-zone">
+          <!-- D-PAD VIEW (DEFAULT) -->
+          <div id="dpadView" class="dpad-wrapper">
             <div class="dpad-grid">
-              <div class="dpad-row">
-                <button class="dpad-btn dpad-up" data-move="F" aria-label="Forward">
-                  <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 4l-8 8h6v8h4v-8h6z"/></svg>
-                  <span>FWD</span>
-                </button>
-              </div>
-              <div class="dpad-row dpad-middle">
-                <button class="dpad-btn dpad-left" data-move="L" aria-label="Left">
-                  <svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 12l8-8v6h8v4h-8v6z"/></svg>
-                  <span>LEFT</span>
-                </button>
-                <button class="dpad-btn dpad-stop" id="stop" aria-label="Emergency Stop">
-                  <div class="stop-inner">
-                    <svg viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
-                    <span>STOP</span>
-                  </div>
-                </button>
-                <button class="dpad-btn dpad-right" data-move="R" aria-label="Right">
-                  <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 12l-8 8v-6H4v-4h8V4z"/></svg>
-                  <span>RIGHT</span>
-                </button>
-              </div>
-              <div class="dpad-row">
-                <button class="dpad-btn dpad-down" data-move="B" aria-label="Reverse">
-                  <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 20l8-8h-6V4h-4v8H4z"/></svg>
-                  <span>REV</span>
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <!-- VIRTUAL JOYSTICK CONTROLLER -->
-          <div id="joyContainer" class="joystick-box" style="display:none;">
-            <div class="joystick-ring" id="joyZone">
-              <div class="joy-axis joy-axis-x"></div>
-              <div class="joy-axis joy-axis-y"></div>
-              <div class="joy-stick" id="joyStick">
-                <div class="joy-thumb"></div>
-              </div>
-            </div>
-            <div class="joy-telemetry">
-              <span>ANGLE: <b id="joyAngle">0°</b></span>
-              <span>DIR: <b id="joyDir">IDLE</b></span>
-              <span>THRUST: <b id="joyPower">0%</b></span>
-            </div>
-          </div>
-
-          <!-- Quick Tactical Maneuver Buttons -->
-          <div class="maneuver-strip">
-            <button class="tactical-btn" id="rotL">
-              <span class="tac-icon">↶</span>
-              <span>90° LEFT</span>
-            </button>
-            <button class="tactical-btn" id="rot360">
-              <span class="tac-icon">💫</span>
-              <span>360° SPIN</span>
-            </button>
-            <button class="tactical-btn" id="rotR">
-              <span class="tac-icon">↷</span>
-              <span>90° RIGHT</span>
-            </button>
-          </div>
-
-          <!-- Big Emergency Brake -->
-          <button class="btn-emergency" id="emergencyStop">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-              <circle cx="12" cy="12" r="10"/>
-              <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
-            </svg>
-            <span>EMERGENCY BRAKE</span>
-          </button>
-        </div>
-      </section>
-
-      <!-- ================= TAB 2: RADAR & SENSORS ================= -->
-      <section id="view-radar" class="view-panel">
-        <div class="card radar-card">
-          <div class="card-header">
-            <span class="card-title">180° RADAR SWEEPER</span>
-            <span class="card-badge" id="radarStatusBadge">READY</span>
-          </div>
-
-          <!-- Radar Screen Arc -->
-          <div class="radar-scope-container">
-            <div class="radar-screen" id="radarScreen">
-              <!-- Concentric Rings -->
-              <div class="radar-ring ring-400"><span>400cm</span></div>
-              <div class="radar-ring ring-200"><span>200cm</span></div>
-              <div class="radar-ring ring-100"><span>100cm</span></div>
-              <div class="radar-ring ring-50"><span>50cm</span></div>
+              <button class="dpad-btn dpad-teal dpad-up" data-move="F" aria-label="Forward">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 4l-8 8h16z"/></svg>
+              </button>
               
-              <!-- Angle Grid Lines -->
-              <div class="radar-angle line-left"><span>-60°</span></div>
-              <div class="radar-angle line-center"><span>0°</span></div>
-              <div class="radar-angle line-right"><span>+60°</span></div>
-
-              <!-- Animated Sweep Ray -->
-              <div class="radar-sweep-ray" id="radarSweepRay"></div>
-
-              <!-- Sensor Blips -->
-              <div class="radar-blip" id="blipLeft"><span class="blip-label" id="blipLeftText">L: --</span></div>
-              <div class="radar-blip" id="blipFront"><span class="blip-label" id="blipFrontText">F: --</span></div>
-              <div class="radar-blip" id="blipRight"><span class="blip-label" id="blipRightText">R: --</span></div>
-
-              <div class="radar-robot-center">
-                <svg viewBox="0 0 24 24" fill="#00f2fe"><polygon points="12,2 4,22 12,18 20,22"/></svg>
+              <div class="dpad-mid-row">
+                <button class="dpad-btn dpad-teal dpad-left" data-move="L" aria-label="Left">
+                  <svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 12l8-8v16z"/></svg>
+                </button>
+                <button class="dpad-btn dpad-red dpad-center-stop" id="stop" aria-label="Stop">
+                  <div class="stop-box-icon"></div>
+                </button>
+                <button class="dpad-btn dpad-teal dpad-right" data-move="R" aria-label="Right">
+                  <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 12l-8-8v16z"/></svg>
+                </button>
               </div>
+
+              <button class="dpad-btn dpad-teal dpad-down" data-move="B" aria-label="Reverse">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 20l8-8H4z"/></svg>
+              </button>
             </div>
           </div>
 
-          <!-- Radar Sensor Cards -->
-          <div class="radar-readouts-grid">
-            <div class="radar-box">
-              <span class="box-lbl">LEFT (-60°)</span>
-              <b class="box-val" id="leftVal">-- cm</b>
-            </div>
-            <div class="radar-box highlight">
-              <span class="box-lbl">FRONT (0°)</span>
-              <b class="box-val" id="frontVal">-- cm</b>
-            </div>
-            <div class="radar-box">
-              <span class="box-lbl">RIGHT (+60°)</span>
-              <b class="box-val" id="rightVal">-- cm</b>
-            </div>
-          </div>
-
-          <div class="radar-actions">
-            <button class="btn btn-cyber" id="scan">
-              <span class="btn-icon">📡</span>
-              <span>TRIGGER SERVO SWEEP</span>
-            </button>
-            <button class="btn btn-cyber-ghost" id="sonarToggleBtn">
-              <span class="btn-icon">🔊</span>
-              <span id="sonarToggleText">SONAR: ON</span>
-            </button>
-          </div>
-        </div>
-
-        <!-- Gyroscope Orientation Card -->
-        <div class="card mpu-card">
-          <div class="card-header">
-            <span class="card-title">MPU6050 ATTITUDE & COMPASS</span>
-          </div>
-          <div class="compass-large-box">
-            <div class="compass-large-dial" id="largeCompass">
-              <div class="dial-mark mark-n">N</div>
-              <div class="dial-mark mark-e">E</div>
-              <div class="dial-mark mark-s">S</div>
-              <div class="dial-mark mark-w">W</div>
-              <div class="dial-needle"></div>
-            </div>
-            <div class="compass-stats">
-              <div class="stat-row"><span>YAW HEADING</span><b id="yawLarge">0.0°</b></div>
-              <div class="stat-row"><span>GYRO STATUS</span><b class="text-neon">ONLINE</b></div>
-              <div class="stat-row"><span>CALIBRATION</span><b>ZEROED</b></div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- ================= TAB 3: PATH DRAW AUTONAV ================= -->
-      <section id="view-path" class="view-panel">
-        <div class="card path-card">
-          <div class="card-header">
-            <span class="card-title">AUTONAV PATH DRAW</span>
-            <span class="card-badge" id="pathPointsBadge">0 POINTS</span>
-          </div>
-
-          <p class="card-desc">Draw a steering path on the grid. NovaX will calculate the trajectory curve and steer automatically.</p>
-
-          <div class="canvas-wrapper">
-            <canvas id="draw"></canvas>
+          <!-- CANVAS VIEW (REPLACES DPAD ON DRAW CLICK) -->
+          <div id="canvasView" class="canvas-wrapper" style="display:none;">
+            <canvas id="drawCanvas"></canvas>
             <div class="canvas-watermark">
-              <span class="wm-fwd">FORWARD ▲</span>
-              <div class="wm-car">
-                <svg viewBox="0 0 24 24" fill="#00f2fe" width="28" height="28">
+              <span>FORWARD ▲</span>
+              <div class="watermark-car">
+                <svg viewBox="0 0 24 24" fill="#00bfa5" width="22" height="22">
                   <polygon points="12,2 4,22 12,18 20,22"/>
                 </svg>
               </div>
-              <span class="wm-start">START ORIGIN</span>
+              <span>ORIGIN</span>
             </div>
           </div>
+        </div>
 
-          <!-- Trajectory Prediction Card -->
-          <div class="trajectory-card">
-            <span class="traj-label">PREDICTED MOTION:</span>
-            <span class="traj-val" id="trajPrediction">DRAW A PATH</span>
+        <!-- BOTTOM BUTTONS: DRAW MODE, CLEAR, SEND PATH -->
+        <div class="controls-action-row">
+          <button id="drawModeBtn" class="pill-btn outline">Draw Mode</button>
+          <button id="clearBtn" class="pill-btn">Clear</button>
+          <button id="sendPathBtn" class="pill-btn blue">Send Path</button>
+        </div>
+      </section>
+
+      <!-- ================= 2. NOVA X CENTER CARD ================= -->
+      <section class="card card-center">
+        <h1 class="card-hero-title">NOVA X</h1>
+
+        <!-- Status & Telemetry Row -->
+        <div class="hero-status-row">
+          <div class="status-item">Battery: <b id="batteryStat">--%</b></div>
+          <div class="status-item">Status: <b id="connStatusStat" class="status-red">No connection</b></div>
+        </div>
+
+        <!-- Mode & Stop Row -->
+        <div class="hero-actions-row">
+          <button id="modeToggleBtn" class="hero-btn hero-blue">MANUAL</button>
+          <button id="centerStopBtn" class="hero-btn hero-red">STOP</button>
+        </div>
+
+        <!-- Rotation Section -->
+        <div class="control-group">
+          <div class="group-title">Rotation</div>
+          <div class="pill-row">
+            <button id="rotLBtn" class="pill-btn">Rotate L</button>
+            <button id="rotRBtn" class="pill-btn">Rotate R</button>
+            <button id="rot360Btn" class="pill-btn blue">360°</button>
           </div>
+        </div>
 
-          <div class="canvas-actions">
-            <button class="btn btn-cyber-ghost" id="clear">
-              <span class="btn-icon">🗑️</span>
-              <span>CLEAR</span>
-            </button>
-            <button class="btn btn-cyber" id="sendPath">
-              <span class="btn-icon">🚀</span>
-              <span>EXECUTE PATH</span>
-            </button>
+        <!-- LEDs Section -->
+        <div class="control-group">
+          <div class="group-title">LEDs</div>
+          <div class="pill-row">
+            <button class="pill-btn active" data-led="off">Off</button>
+            <button class="pill-btn" data-led="blink">Blink</button>
+            <button class="pill-btn" data-led="warn">Warn</button>
+            <button class="pill-btn" data-led="pulse">Pulse</button>
           </div>
         </div>
       </section>
 
-      <!-- ================= TAB 4: LED EFFECTS ================= -->
-      <section id="view-lights" class="view-panel">
-        <div class="card lights-card">
-          <div class="card-header">
-            <span class="card-title">74HC595 LED CONTROLLER</span>
-            <span class="card-badge" id="ledEffectBadge">OFF</span>
-          </div>
+      <!-- ================= 3. RADAR CARD ================= -->
+      <section class="card card-radar">
+        <div class="card-header-simple">
+          <span class="card-title">Radar</span>
+          <span class="card-mode-tag" id="radarStatusTag">IDLE</span>
+        </div>
 
-          <!-- 8-LED Shift Register Virtual Simulation Bar -->
-          <div class="led-bar-box">
-            <div class="led-indicator-strip">
-              <div class="cyber-led" data-idx="0"><span class="led-glow"></span><span class="led-lbl">D1</span></div>
-              <div class="cyber-led" data-idx="1"><span class="led-glow"></span><span class="led-lbl">D2</span></div>
-              <div class="cyber-led" data-idx="2"><span class="led-glow"></span><span class="led-lbl">D3</span></div>
-              <div class="cyber-led" data-idx="3"><span class="led-glow"></span><span class="led-lbl">D4</span></div>
-              <div class="cyber-led" data-idx="4"><span class="led-glow"></span><span class="led-lbl">D5</span></div>
-              <div class="cyber-led" data-idx="5"><span class="led-glow"></span><span class="led-lbl">D6</span></div>
-              <div class="cyber-led" data-idx="6"><span class="led-glow"></span><span class="led-lbl">D7</span></div>
-              <div class="cyber-led" data-idx="7"><span class="led-glow"></span><span class="led-lbl">D8</span></div>
+        <!-- Semicircular Radar Arc -->
+        <div class="radar-scope-box">
+          <div class="radar-arc-screen" id="radarScreen">
+            <div class="radar-curve curve-outer"></div>
+            <div class="radar-curve curve-mid"></div>
+            <div class="radar-curve curve-inner"></div>
+
+            <!-- Animated Sweeper Ray -->
+            <div class="radar-sweep-needle" id="sweepNeedle"></div>
+
+            <!-- Distance Sensor Readout In Center -->
+            <div class="radar-center-readout">
+              <span id="radarDistVal">--</span> cm
             </div>
-          </div>
 
-          <!-- LED Effect Selectors -->
-          <div class="led-presets-grid">
-            <button class="led-card-btn active" data-led="off">
-              <div class="led-icon">⬛</div>
-              <div class="led-title">OFF</div>
-              <div class="led-desc">All outputs shut down</div>
-            </button>
-            <button class="led-card-btn" data-led="blink">
-              <div class="led-icon">✨</div>
-              <div class="led-title">BLINK</div>
-              <div class="led-desc">Full 8-LED sync strobe</div>
-            </button>
-            <button class="led-card-btn" data-led="warn">
-              <div class="led-icon">⚠️</div>
-              <div class="led-title">WARN</div>
-              <div class="led-desc">Side hazard flashers</div>
-            </button>
-            <button class="led-card-btn" data-led="pulse">
-              <div class="led-icon">🌊</div>
-              <div class="led-title">PULSE</div>
-              <div class="led-desc">Center chaser sweep</div>
-            </button>
-          </div>
-        </div>
-      </section>
-
-      <!-- ================= TAB 5: SYSTEM & OTA ================= -->
-      <section id="view-system" class="view-panel">
-        
-        <!-- Host URL Manager -->
-        <div class="card system-card">
-          <div class="card-header">
-            <span class="card-title">ROBOT CONNECTION</span>
-          </div>
-
-          <div class="input-group">
-            <label for="hostUrlInput">ESP32 Endpoint Address</label>
-            <div class="input-with-btn">
-              <input type="text" id="hostUrlInput" placeholder="http://192.168.4.1" autocomplete="off" spellcheck="false">
-              <button class="btn btn-cyber" id="saveHostBtn">CONNECT</button>
-            </div>
-          </div>
-
-          <div class="host-presets">
-            <button class="preset-pill" data-ip="http://192.168.4.1">AP: 192.168.4.1</button>
-            <button class="preset-pill" data-ip="http://novax.local">STA: novax.local</button>
+            <!-- Dynamic Obstacle Detection Blips -->
+            <div class="radar-blip" id="blipLeft"><span>L</span></div>
+            <div class="radar-blip" id="blipFront"><span>F</span></div>
+            <div class="radar-blip" id="blipRight"><span>R</span></div>
           </div>
         </div>
 
-        <!-- Wi-Fi Management -->
-        <div class="card system-card">
-          <div class="card-header">
-            <span class="card-title">WI-FI MANAGEMENT</span>
-          </div>
-
-          <div class="info-row"><span>Active Mode:</span><b id="wifiMode" class="text-neon">AP</b></div>
-          <div class="info-row"><span>Current IP:</span><b id="wifiIp">192.168.4.1</b></div>
-
-          <div class="dual-actions">
-            <button class="btn btn-cyber-ghost" id="switchSta">SWITCH TO STA</button>
-            <button class="btn btn-cyber-ghost" id="switchAp">SWITCH TO AP</button>
-          </div>
-
-          <button class="btn btn-cyber w-100 mt-10" id="wifiScan">
-            <span class="btn-icon">🔍</span>
-            <span>SEARCH NEARBY WI-FI</span>
-          </button>
-
-          <div id="networks" class="wifi-list-box"></div>
-
-          <div class="section-divider">SAVED PROFILES (NVS)</div>
-          <div id="saved" class="wifi-list-box"></div>
+        <!-- Radar Action Buttons -->
+        <div class="radar-action-row">
+          <button id="scanBtn" class="pill-btn blue">Scan</button>
+          <button id="sonarToggleBtn" class="pill-btn active">Sonar ON</button>
         </div>
-
-        <!-- Firmware OTA Update -->
-        <div class="card system-card">
-          <div class="card-header">
-            <span class="card-title">FIRMWARE OTA FLASH</span>
-          </div>
-
-          <div class="info-row"><span>Installed Version:</span><b id="fwVersion">2.1.0-pwa-ota</b></div>
-
-          <div class="input-group mt-10">
-            <label for="otaTokenInput">OTA Security Token</label>
-            <input type="password" id="otaTokenInput" value="NovaX-OTA-ChangeMe" placeholder="OTA Token">
-          </div>
-
-          <div class="file-picker-wrapper mt-10">
-            <input id="fwFile" type="file" accept=".bin,application/octet-stream">
-          </div>
-
-          <button class="btn btn-cyber-danger w-100 mt-12" id="fwUpdate">
-            <span class="btn-icon">⚡</span>
-            <span>FLASH FIRMWARE .BIN</span>
-          </button>
-          <div id="fwMsg" class="ota-status-msg"></div>
-        </div>
-
-        <!-- GitHub App Updates Card -->
-        <div class="card system-card update-system-card">
-          <div class="card-header">
-            <span class="card-title">GITHUB APP UPDATES</span>
-            <span class="card-badge" id="appVersionBadge">v2.2.0</span>
-          </div>
-
-          <div class="info-row">
-            <span>Installed Version:</span>
-            <b id="installedAppVer" class="text-neon">v2.2.0</b>
-          </div>
-          <div class="info-row">
-            <span>Active Source:</span>
-            <b id="codeSourceTag">Native Bundle</b>
-          </div>
-          <div class="info-row">
-            <span>GitHub Version:</span>
-            <b id="remoteAppVer">—</b>
-          </div>
-
-          <div class="input-group mt-10">
-            <label for="ghRepoInput">GitHub Repository (username/repo)</label>
-            <input type="text" id="ghRepoInput" placeholder="onebotyt/robocar" value="onebotyt/robocar" spellcheck="false" autocomplete="off">
-          </div>
-
-          <div class="input-group mt-8">
-            <label for="ghBranchInput">Branch</label>
-            <input type="text" id="ghBranchInput" placeholder="main" value="main" spellcheck="false" autocomplete="off">
-          </div>
-
-          <div class="dual-actions mt-12">
-            <button class="btn btn-cyber" id="checkGhUpdateBtn">
-              <span class="btn-icon">🔍</span>
-              <span>CHECK GITHUB</span>
-            </button>
-            <button class="btn btn-cyber-update" id="hotUpdateBtn">
-              <span class="btn-icon">⚡</span>
-              <span>UPDATE APP NOW</span>
-            </button>
-          </div>
-
-          <div class="dual-actions mt-8">
-            <button class="btn btn-cyber-ghost" id="downloadApkBtn">
-              <span class="btn-icon">📦</span>
-              <span>LATEST APK</span>
-            </button>
-            <button class="btn btn-cyber-ghost" id="factoryResetAppBtn" title="Reset to native APK bundle">
-              <span class="btn-icon">↺</span>
-              <span>RESET BUNDLE</span>
-            </button>
-          </div>
-
-          <div id="updateLog" class="update-log-box mt-10" style="display:none;"></div>
-        </div>
-
-        <!-- App Installation & Mobile Info -->
-        <div class="card system-card">
-          <div class="card-header">
-            <span class="card-title">MOBILE APP INSTALLATION</span>
-          </div>
-          <p class="card-desc">Install NovaX to your phone's home screen for full-screen native experience with zero browser bars.</p>
-          <button class="btn btn-cyber w-100" id="pwaInstallBtn">
-            <span class="btn-icon">📲</span>
-            <span>INSTALL APP TO PHONE</span>
-          </button>
-          <div class="app-version-info">
-            <span>NovaX Engine: v2.1 Mobile Cockpit</span>
-            <span>PWA & Native Capacitor Ready</span>
-          </div>
-        </div>
-
       </section>
 
     </main>
 
-    <!-- BOTTOM MOBILE NAVIGATION BAR -->
-    <nav class="bottom-nav">
-      <button class="nav-item active" data-view="view-drive">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polygon points="6 3 18 3 21 9 18 21 6 21 3 9 6 3" />
-          <circle cx="12" cy="12" r="3" />
-        </svg>
-        <span>DRIVE</span>
-      </button>
-
-      <button class="nav-item" data-view="view-radar">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="9"/>
-          <path d="M12 3a9 9 0 0 1 9 9"/>
-          <line x1="12" y1="12" x2="19" y2="5"/>
-        </svg>
-        <span>RADAR</span>
-      </button>
-
-      <button class="nav-item" data-view="view-path">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M3 17l6-6 4 4 8-8"/>
-          <circle cx="21" cy="7" r="2"/>
-        </svg>
-        <span>PATH</span>
-      </button>
-
-      <button class="nav-item" data-view="view-lights">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="5"/>
-          <line x1="12" y1="1" x2="12" y2="3"/>
-          <line x1="12" y1="21" x2="12" y2="23"/>
-          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
-          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
-          <line x1="1" y1="12" x2="3" y2="12"/>
-          <line x1="21" y1="12" x2="23" y2="12"/>
-        </svg>
-        <span>LIGHTS</span>
-      </button>
-
-      <button class="nav-item" data-view="view-system">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="3"/>
-          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-        </svg>
-        <span>SYSTEM</span>
-      </button>
-    </nav>
-
-    <!-- Quick Host Selector Modal -->
-    <div id="hostModal" class="modal-backdrop" style="display:none;">
-      <div class="modal-card">
-        <div class="modal-header">
-          <h3>SWITCH ROBOT HOST</h3>
-          <button id="closeHostModal" class="close-btn">&times;</button>
+    <!-- LIVE CAMERA MODAL DIALOG -->
+    <div id="cameraModal" class="modal-backdrop" style="display:none;">
+      <div class="modal-box cam-modal-box">
+        <div class="modal-top">
+          <h3>LIVE CAMERA (OV7670)</h3>
+          <button class="modal-close-x" id="closeCamModal">&times;</button>
         </div>
-        <p class="modal-desc">Enter the IP or address of your NovaX ESP32 robot:</p>
-        <input type="text" id="modalHostInput" class="modal-input" placeholder="http://192.168.4.1">
-        <div class="modal-presets">
-          <button class="modal-pill" data-ip="http://192.168.4.1">AP: 192.168.4.1</button>
-          <button class="modal-pill" data-ip="http://novax.local">STA: novax.local</button>
+
+        <div class="cam-feed-container">
+          <img id="cam" alt="NovaX Camera Stream" class="cam-img">
+          <div id="camStandby" class="cam-standby-overlay active">
+            <div class="standby-reticle"></div>
+            <span>CAMERA STANDBY</span>
+          </div>
+          <div class="cam-info-bar">
+            <span>FPS: <b id="camFpsVal">0</b></span>
+            <span id="camStateBadge">OFF</span>
+          </div>
         </div>
-        <div class="modal-actions">
-          <button class="btn btn-cyber" id="modalSaveHost">APPLY & CONNECT</button>
+
+        <div class="modal-btn-row">
+          <button id="camToggleBtn" class="pill-btn blue">Camera ON</button>
+          <button id="camSnapBtn" class="pill-btn">Snapshot</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- SETTINGS, WI-FI & GITHUB UPDATES MODAL -->
+    <div id="settingsModal" class="modal-backdrop" style="display:none;">
+      <div class="modal-box settings-modal-box">
+        <div class="modal-top">
+          <h3>SYSTEM & UPDATES</h3>
+          <button class="modal-close-x" id="closeSettingsModal">&times;</button>
+        </div>
+
+        <div class="settings-scroll-area">
+          
+          <!-- Robot Host IP -->
+          <div class="config-block">
+            <label class="block-label">Robot Host Address</label>
+            <div class="inline-input-group">
+              <input type="text" id="hostUrlInput" placeholder="http://192.168.4.1" spellcheck="false">
+              <button id="saveHostBtn" class="pill-btn blue">Save</button>
+            </div>
+            <div class="pill-row mt-6">
+              <button class="pill-btn quick-host-pill" data-ip="http://192.168.4.1">AP: 192.168.4.1</button>
+              <button class="pill-btn quick-host-pill" data-ip="http://novax.local">STA: novax.local</button>
+            </div>
+          </div>
+
+          <!-- Wi-Fi Management -->
+          <div class="config-block">
+            <div class="block-title">Wi-Fi Mode & Networks</div>
+            <div class="stat-line"><span>Mode:</span> <b id="wifiModeVal">AP</b></div>
+            <div class="stat-line"><span>IP:</span> <b id="wifiIpVal">192.168.4.1</b></div>
+            
+            <div class="pill-row mt-6">
+              <button id="switchStaBtn" class="pill-btn">Switch to STA</button>
+              <button id="switchApBtn" class="pill-btn">Switch to AP</button>
+            </div>
+
+            <button id="scanWifiBtn" class="pill-btn blue w-100 mt-8">Search Wi-Fi</button>
+            <div id="wifiNetworksList" class="wifi-list-box"></div>
+
+            <div class="sub-label mt-8">Saved Networks (NVS)</div>
+            <div id="savedWifiList" class="wifi-list-box"></div>
+          </div>
+
+          <!-- GitHub In-App Updater -->
+          <div class="config-block highlight-block">
+            <div class="block-title">GitHub App Updates</div>
+            <div class="stat-line"><span>Installed Version:</span> <b id="installedAppVer" class="text-green">v2.2.0</b></div>
+            <div class="stat-line"><span>Remote Version:</span> <b id="remoteAppVer">—</b></div>
+
+            <label class="block-label mt-6">Repository (username/repo)</label>
+            <input type="text" id="ghRepoInput" placeholder="onebotyt/robocar" value="onebotyt/robocar" spellcheck="false">
+
+            <div class="pill-row mt-8">
+              <button id="checkGhUpdateBtn" class="pill-btn">Check GitHub</button>
+              <button id="hotUpdateBtn" class="pill-btn blue">Update App Now</button>
+            </div>
+
+            <div class="pill-row mt-6">
+              <button id="downloadApkBtn" class="pill-btn">Latest APK</button>
+              <button id="factoryResetAppBtn" class="pill-btn">Reset Bundle</button>
+            </div>
+
+            <div id="updateLogBox" class="update-log-box mt-6" style="display:none;"></div>
+          </div>
+
+          <!-- Firmware OTA Update -->
+          <div class="config-block">
+            <div class="block-title">Firmware OTA Flash</div>
+            <div class="stat-line"><span>Firmware:</span> <b id="fwVersionVal">2.1.0-pwa-ota</b></div>
+            <input type="password" id="otaTokenInput" value="NovaX-OTA-ChangeMe" placeholder="OTA Token" class="mt-6">
+            <input type="file" id="fwFileInput" accept=".bin,application/octet-stream" class="mt-6">
+            <button id="fwUpdateBtn" class="pill-btn red w-100 mt-8">Update ESP32</button>
+            <div id="fwMsg" class="ota-msg-text"></div>
+          </div>
+
         </div>
       </div>
     </div>

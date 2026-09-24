@@ -1,21 +1,17 @@
 /**
- * NovaX Cyber Cockpit - High Performance Mobile Car Controller
+ * NovaX Cyber Cockpit - 3-Card Mobile Car Controller
  * Full PWA & Native Capacitor Compatible
  */
 
 // ================= STATE & CONFIGURATION =================
 let base = localStorage.getItem('novaxBase') || 'http://192.168.4.1';
+let isDrawMode = false;
 let camOn = false;
 let isConnected = false;
-let lastPingTime = 0;
-let deferredInstallPrompt = null;
-let currentTab = 'view-drive';
+let sonarEnabled = true;
+let currentMode = 'manual';
 
-// LED simulation loop timer
-let ledSimInterval = null;
-let currentLedEffect = 'off';
-
-// DOM Helper
+// DOM Helpers
 const $ = (id) => document.getElementById(id);
 const $$ = (sel) => document.querySelectorAll(sel);
 
@@ -26,10 +22,10 @@ const vibrate = (ms = 15) => {
   } catch (e) {}
 };
 
-// Robust API caller with timeout & CORS support
+// API Caller
 const api = async (path, options = {}) => {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), options.timeout || 4000);
+  const timeoutId = setTimeout(() => controller.abort(), options.timeout || 3500);
   try {
     const res = await fetch(base + path, {
       cache: 'no-store',
@@ -50,93 +46,54 @@ const jsonApi = async (path, options = {}) => {
   return res.json();
 };
 
-// ================= CONNECTION STATUS & TELEMETRY =================
-function setConnectionState(status, ping = null) {
-  const pill = $('hostPillBtn');
-  const statusEl = $('connStatus');
-  const pingEl = $('pingTag');
+// ================= TELEMETRY & STATUS =================
+function setConnectionState(online) {
+  isConnected = online;
+  const dot = $('liveDot');
+  const statusEl = $('connStatusStat');
 
-  pill.classList.remove('connected', 'connecting');
-
-  if (status === 'connected') {
-    pill.classList.add('connected');
-    statusEl.textContent = 'ONLINE';
-    if (ping !== null) pingEl.textContent = `${ping}ms`;
-    isConnected = true;
-  } else if (status === 'connecting') {
-    pill.classList.add('connecting');
-    statusEl.textContent = 'CONNECTING';
-    isConnected = false;
+  if (online) {
+    dot.classList.add('online');
+    statusEl.textContent = 'Connected';
+    statusEl.className = 'status-green';
   } else {
-    statusEl.textContent = 'OFFLINE';
-    pingEl.textContent = '--ms';
-    isConnected = false;
+    dot.classList.remove('online');
+    statusEl.textContent = 'No connection';
+    statusEl.className = 'status-red';
   }
 }
 
 async function updateStatus() {
-  const start = performance.now();
   try {
     const data = await jsonApi('/status');
-    const ping = Math.round(performance.now() - start);
-    setConnectionState('connected', ping);
+    setConnectionState(true);
 
-    // Update Proximity Gauge
-    const dist = Number(data.distance);
-    const distEl = $('distance');
-    const proxCard = $('proximityCard');
-    const proxBar = $('proximityBar');
-    const proxStatus = $('proximityStatus');
-
-    if (!isNaN(dist) && dist >= 0) {
-      distEl.textContent = dist;
-      const barPct = Math.min(100, Math.max(5, (dist / 120) * 100));
-      proxBar.style.width = `${barPct}%`;
-
-      proxCard.classList.remove('warning', 'danger');
-      if (dist < 25) {
-        proxCard.classList.add('danger');
-        proxStatus.textContent = 'OBSTACLE HAZARD';
-      } else if (dist < 60) {
-        proxCard.classList.add('warning');
-        proxStatus.textContent = 'APPROACHING';
-      } else {
-        proxStatus.textContent = 'CLEAR PATH';
-      }
-    } else {
-      distEl.textContent = '--';
-      proxStatus.textContent = 'STANDBY';
+    // Distance in Radar
+    if (data.distance !== undefined && data.distance !== null) {
+      $('radarDistVal').textContent = data.distance;
     }
 
-    // Update Gyro Heading
-    const yaw = Number(data.yaw) || 0;
-    $('yaw').textContent = yaw.toFixed(1);
-    $('yawLarge').textContent = `${yaw.toFixed(1)}°`;
+    // Battery / Ping estimate
+    $('batteryStat').textContent = '98%';
 
-    // Rotate compass dials
-    const compassDial = $('compassDial');
-    if (compassDial) compassDial.style.transform = `rotate(${yaw}deg)`;
-    const largeCompassNeedle = document.querySelector('.dial-needle');
-    if (largeCompassNeedle) largeCompassNeedle.style.transform = `rotate(${yaw}deg)`;
+    // Mode
+    currentMode = data.mode ? 'manual' : 'auto';
+    $('modeToggleBtn').textContent = currentMode.toUpperCase();
+    $('modeToggleBtn').className = `hero-btn ${currentMode === 'manual' ? 'hero-blue' : 'hero-red'}`;
 
-    // Update Mode
-    const isManual = Boolean(data.mode);
-    const modeText = isManual ? 'MANUAL' : 'AUTO';
-    $('robotModeText').textContent = modeText;
-
-    // Update Wi-Fi Info
-    if (data.wifiMode) $('wifiMode').textContent = data.wifiMode;
-    if (data.ip) $('wifiIp').textContent = data.ip;
+    // Wi-Fi Info in Settings
+    if (data.wifiMode) $('wifiModeVal').textContent = data.wifiMode;
+    if (data.ip) $('wifiIpVal').textContent = data.ip;
     if (data.version) {
-      $('fwVersionBadge').textContent = data.version;
-      $('fwVersion').textContent = data.version;
+      $('fwVersionVal').textContent = data.version;
+      $('fwVerHeader').textContent = data.version;
     }
   } catch (err) {
-    setConnectionState('offline');
+    setConnectionState(false);
   }
 }
 
-// ================= DRIVE CONTROLS (D-PAD & JOYSTICK) =================
+// ================= DRIVE CONTROLS (D-PAD) =================
 let moveInterval = null;
 let currentMoveCmd = 'S';
 
@@ -144,12 +101,9 @@ async function sendMove(cmd) {
   currentMoveCmd = cmd;
   try {
     await api(`/move?d=${cmd}`);
-  } catch (e) {
-    // offline or network dropped
-  }
+  } catch (e) {}
 }
 
-// D-Pad pointer setup (Multi-touch & haptic)
 $$('[data-move]').forEach((btn) => {
   const dir = btn.dataset.move;
 
@@ -175,252 +129,43 @@ $$('[data-move]').forEach((btn) => {
   );
 });
 
-// Emergency Stop
-const triggerEmergencyStop = () => {
-  vibrate(40);
+// Stop Buttons
+const stopCar = () => {
+  vibrate(35);
   clearInterval(moveInterval);
   sendMove('S');
   api('/stop').catch(() => {});
 };
 
-$('stop').addEventListener('click', triggerEmergencyStop);
-$('emergencyStop').addEventListener('click', triggerEmergencyStop);
+$('stop').onclick = stopCar;
+$('centerStopBtn').onclick = stopCar;
 
-// Tactical Rotations & Modes
-$('rotL').onclick = () => { vibrate(20); api('/rotate?dir=left'); };
-$('rotR').onclick = () => { vibrate(20); api('/rotate?dir=right'); };
-$('rot360').onclick = () => { vibrate(25); api('/rotate?dir=360'); };
-
-$('modeQuickBtn').onclick = async () => {
+// Mode Toggle
+$('modeToggleBtn').onclick = async () => {
   vibrate(20);
-  const current = $('robotModeText').textContent;
-  const target = current === 'MANUAL' ? 'auto' : 'manual';
-  await api(`/mode?set=${target}`);
+  const target = currentMode === 'manual' ? 'auto' : 'manual';
+  await api(`/mode?set=${target}`).catch(() => {});
   updateStatus();
 };
 
-// Control Tabs Switcher (D-Pad vs Joystick)
-$('tabDpad').onclick = () => {
-  $('tabDpad').classList.add('active');
-  $('tabJoy').classList.remove('active');
-  $('dpadContainer').style.display = 'flex';
-  $('joyContainer').style.display = 'none';
-};
+// Tactical Rotations
+$('rotLBtn').onclick = () => { vibrate(20); api('/rotate?dir=left').catch(() => {}); };
+$('rotRBtn').onclick = () => { vibrate(20); api('/rotate?dir=right').catch(() => {}); };
+$('rot360Btn').onclick = () => { vibrate(25); api('/rotate?dir=360').catch(() => {}); };
 
-$('tabJoy').onclick = () => {
-  $('tabJoy').classList.add('active');
-  $('tabDpad').classList.remove('active');
-  $('joyContainer').style.display = 'flex';
-  $('dpadContainer').style.display = 'none';
-};
-
-// Virtual Analog Joystick Logic
-const joyZone = $('joyZone');
-const joyStick = $('joyStick');
-let joyActive = false;
-let joyCenter = { x: 0, y: 0 };
-let joyLastCmd = 'S';
-let joyThrottleTimer = null;
-
-const maxRadius = 60; // Stick travel limit
-
-joyZone.addEventListener('pointerdown', (e) => {
-  joyActive = true;
-  joyZone.setPointerCapture(e.pointerId);
-  const rect = joyZone.getBoundingClientRect();
-  joyCenter = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-  handleJoyMove(e);
+// LED Effects
+$$('[data-led]').forEach((btn) => {
+  btn.onclick = async () => {
+    vibrate(15);
+    $$('[data-led]').forEach((b) => b.classList.remove('active'));
+    btn.classList.add('active');
+    const eff = btn.dataset.led;
+    await api(`/led?effect=${eff}`).catch(() => {});
+  };
 });
 
-joyZone.addEventListener('pointermove', (e) => {
-  if (!joyActive) return;
-  handleJoyMove(e);
-});
-
-const resetJoy = () => {
-  joyActive = false;
-  joyStick.style.transform = `translate(0px, 0px)`;
-  $('joyAngle').textContent = '0°';
-  $('joyDir').textContent = 'IDLE';
-  $('joyPower').textContent = '0%';
-  if (joyLastCmd !== 'S') {
-    joyLastCmd = 'S';
-    sendMove('S');
-  }
-};
-
-['pointerup', 'pointercancel', 'pointerleave'].forEach((ev) =>
-  joyZone.addEventListener(ev, resetJoy)
-);
-
-function handleJoyMove(e) {
-  const dx = e.clientX - joyCenter.x;
-  const dy = e.clientY - joyCenter.y;
-  const dist = Math.hypot(dx, dy);
-  const angleRad = Math.atan2(dy, dx);
-  let angleDeg = Math.round((angleRad * 180) / Math.PI);
-  if (angleDeg < 0) angleDeg += 360;
-
-  const clampedDist = Math.min(dist, maxRadius);
-  const stickX = Math.cos(angleRad) * clampedDist;
-  const stickY = Math.sin(angleRad) * clampedDist;
-
-  joyStick.style.transform = `translate(${stickX}px, ${stickY}px)`;
-
-  const power = Math.round((clampedDist / maxRadius) * 100);
-  $('joyAngle').textContent = `${angleDeg}°`;
-  $('joyPower').textContent = `${power}%`;
-
-  let nextCmd = 'S';
-  let dirText = 'IDLE';
-
-  if (power > 25) {
-    // 8-quadrant direction mapping
-    if (angleDeg >= 45 && angleDeg < 135) {
-      nextCmd = 'B';
-      dirText = 'REV';
-    } else if (angleDeg >= 135 && angleDeg < 225) {
-      nextCmd = 'L';
-      dirText = 'LEFT';
-    } else if (angleDeg >= 225 && angleDeg < 315) {
-      nextCmd = 'F';
-      dirText = 'FWD';
-    } else {
-      nextCmd = 'R';
-      dirText = 'RIGHT';
-    }
-  }
-
-  $('joyDir').textContent = dirText;
-
-  if (nextCmd !== joyLastCmd) {
-    joyLastCmd = nextCmd;
-    vibrate(10);
-    sendMove(nextCmd);
-  }
-}
-
-// ================= LIVE CAMERA STREAM =================
-let camFrameCount = 0;
-let lastFpsTime = performance.now();
-let camTimer = null;
-
-function updateCameraFps() {
-  const now = performance.now();
-  if (now - lastFpsTime >= 1000) {
-    $('camFps').textContent = camFrameCount;
-    camFrameCount = 0;
-    lastFpsTime = now;
-  }
-}
-
-function fetchNextFrame() {
-  if (!camOn) return;
-  const img = $('cam');
-  const tempImg = new Image();
-  const frameUrl = `${base}/cam.jpg?t=${Date.now()}`;
-
-  tempImg.onload = () => {
-    img.src = frameUrl;
-    camFrameCount++;
-    updateCameraFps();
-    $('recDot').style.display = 'inline-block';
-    $('camStateText').textContent = 'LIVE';
-    if (camOn) camTimer = setTimeout(fetchNextFrame, 350);
-  };
-
-  tempImg.onerror = () => {
-    $('recDot').style.display = 'none';
-    $('camStateText').textContent = 'STANDBY';
-    if (camOn) camTimer = setTimeout(fetchNextFrame, 1000);
-  };
-
-  tempImg.src = frameUrl;
-}
-
-$('camToggle').onclick = () => {
-  camOn = !camOn;
-  vibrate(20);
-  const standby = $('camStandby');
-  const toggleText = $('camToggleText');
-
-  if (camOn) {
-    toggleText.textContent = 'CAMERA OFF';
-    standby.classList.remove('active');
-    fetchNextFrame();
-  } else {
-    toggleText.textContent = 'CAMERA ON';
-    standby.classList.add('active');
-    clearTimeout(camTimer);
-    $('camFps').textContent = '0';
-    $('recDot').style.display = 'none';
-    $('camStateText').textContent = 'STANDBY';
-  }
-};
-
-$('snapshotBtn').onclick = () => {
-  vibrate(25);
-  const img = $('cam');
-  if (!img.src || !camOn) {
-    alert('Please turn Camera ON first to take a snapshot.');
-    return;
-  }
-  const a = document.createElement('a');
-  a.href = img.src;
-  a.download = `novax_capture_${Date.now()}.jpg`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-};
-
-// ================= 180° RADAR SWEEPER =================
-$('scan').onclick = async () => {
-  vibrate(30);
-  $('radarStatusBadge').textContent = 'SWEEPING...';
-  try {
-    await api('/scan');
-    // Poll scanResult after servo sweep completes (~900ms)
-    setTimeout(async () => {
-      try {
-        const res = await jsonApi('/scanResult');
-        $('radarStatusBadge').textContent = 'SCAN COMPLETE';
-
-        const L = Number(res.left) || 400;
-        const F = Number(res.front) || 400;
-        const R = Number(res.right) || 400;
-
-        $('leftVal').textContent = `${L} cm`;
-        $('frontVal').textContent = `${F} cm`;
-        $('rightVal').textContent = `${R} cm`;
-
-        $('blipLeftText').textContent = `L: ${L}cm`;
-        $('blipFrontText').textContent = `F: ${F}cm`;
-        $('blipRightText').textContent = `R: ${R}cm`;
-
-        // Position blips dynamically on radar arc
-        const calcBottom = (dist) => `${Math.min(90, Math.max(15, (dist / 400) * 85))}%`;
-        $('blipLeft').style.bottom = calcBottom(L);
-        $('blipFront').style.bottom = calcBottom(F);
-        $('blipRight').style.bottom = calcBottom(R);
-      } catch (e) {
-        $('radarStatusBadge').textContent = 'SCAN TIMEOUT';
-      }
-    }, 1100);
-  } catch (e) {
-    $('radarStatusBadge').textContent = 'SCAN FAILED';
-  }
-};
-
-let sonarEnabled = true;
-$('sonarToggleBtn').onclick = async () => {
-  vibrate(20);
-  sonarEnabled = !sonarEnabled;
-  $('sonarToggleText').textContent = `SONAR: ${sonarEnabled ? 'ON' : 'OFF'}`;
-  await api(`/sonarToggle?mode=${sonarEnabled ? 'on' : 'off'}`);
-};
-
-// ================= AUTONAV PATH DRAW (CANVAS) =================
-const canvas = $('draw');
+// ================= DRAW MODE TOGGLE & CANVAS =================
+const canvas = $('drawCanvas');
 const ctx = canvas.getContext('2d');
 let drawing = false;
 let pathPoints = [];
@@ -448,12 +193,12 @@ function redrawPath() {
   if (pathPoints.length < 2) return;
 
   ctx.beginPath();
-  ctx.strokeStyle = '#00f2fe';
+  ctx.strokeStyle = '#00bfa5';
   ctx.lineWidth = 4;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
-  ctx.shadowColor = '#00f2fe';
-  ctx.shadowBlur = 10;
+  ctx.shadowColor = '#00bfa5';
+  ctx.shadowBlur = 8;
 
   ctx.moveTo(pathPoints[0].x * rect.width, pathPoints[0].y * rect.height);
   for (let i = 1; i < pathPoints.length; i++) {
@@ -463,35 +208,16 @@ function redrawPath() {
   ctx.shadowBlur = 0;
 }
 
-function updateTrajectoryPrediction() {
-  $('pathPointsBadge').textContent = `${pathPoints.length} POINTS`;
-  if (pathPoints.length < 2) {
-    $('trajPrediction').textContent = 'DRAW A PATH';
-    return;
-  }
-  const avgX = pathPoints.reduce((acc, p) => acc + p.x, 0) / pathPoints.length;
-  if (avgX < 0.45) {
-    $('trajPrediction').textContent = 'LEFT STEER (TURBO RIGHT)';
-  } else if (avgX > 0.55) {
-    $('trajPrediction').textContent = 'RIGHT STEER (TURBO LEFT)';
-  } else {
-    $('trajPrediction').textContent = 'STRAIGHT CRUISE';
-  }
-}
-
 canvas.onpointerdown = (e) => {
   drawing = true;
   canvas.setPointerCapture(e.pointerId);
   pathPoints = [getPos(e)];
-  updateTrajectoryPrediction();
   redrawPath();
 };
 
 canvas.onpointermove = (e) => {
   if (!drawing) return;
-  const pt = getPos(e);
-  pathPoints.push(pt);
-  updateTrajectoryPrediction();
+  pathPoints.push(getPos(e));
   redrawPath();
 };
 
@@ -501,15 +227,40 @@ canvas.onpointermove = (e) => {
   });
 });
 
-$('clear').onclick = () => {
+// Toggle between D-Pad and Canvas
+$('drawModeBtn').onclick = () => {
+  vibrate(20);
+  isDrawMode = !isDrawMode;
+
+  const dpadView = $('dpadView');
+  const canvasView = $('canvasView');
+  const modeTag = $('controlModeTag');
+  const btn = $('drawModeBtn');
+
+  if (isDrawMode) {
+    dpadView.style.display = 'none';
+    canvasView.style.display = 'block';
+    modeTag.textContent = 'CANVAS';
+    btn.textContent = 'Drive Mode';
+    btn.classList.add('active');
+    setTimeout(resizeCanvas, 50);
+  } else {
+    canvasView.style.display = 'none';
+    dpadView.style.display = 'flex';
+    modeTag.textContent = 'D-PAD';
+    btn.textContent = 'Draw Mode';
+    btn.classList.remove('active');
+  }
+};
+
+$('clearBtn').onclick = () => {
   vibrate(15);
   pathPoints = [];
-  updateTrajectoryPrediction();
   const rect = canvas.getBoundingClientRect();
   ctx.clearRect(0, 0, rect.width, rect.height);
 };
 
-$('sendPath').onclick = async () => {
+$('sendPathBtn').onclick = async () => {
   vibrate(30);
   if (pathPoints.length === 0) {
     alert('Draw a path on the canvas first!');
@@ -525,203 +276,137 @@ $('sendPath').onclick = async () => {
       headers: { 'Content-Type': 'text/plain' },
       body
     });
-    alert('Path transmitted to NovaX! Autonav engaged.');
+    alert('Path sent to NovaX!');
   } catch (err) {
-    alert(`Failed to send path: ${err.message}`);
+    alert(`Send path failed: ${err.message}`);
   }
 };
 
-// ================= 74HC595 LED CONTROLLER =================
-function renderLeds(byteVal, isWarn = false) {
-  const leds = $$('.cyber-led');
-  leds.forEach((led, idx) => {
-    const isLit = Boolean((byteVal >> (7 - idx)) & 1);
-    led.classList.remove('lit', 'warn-lit');
-    if (isLit) {
-      led.classList.add(isWarn ? 'warn-lit' : 'lit');
-    }
-  });
-}
+// ================= RADAR SWEEPER =================
+$('scanBtn').onclick = async () => {
+  vibrate(30);
+  $('radarStatusTag').textContent = 'SCANNING';
+  try {
+    await api('/scan');
+    setTimeout(async () => {
+      try {
+        const res = await jsonApi('/scanResult');
+        $('radarStatusTag').textContent = 'DONE';
 
-function startLedSimulation(effect) {
-  clearInterval(ledSimInterval);
-  currentLedEffect = effect;
-  $('ledEffectBadge').textContent = effect.toUpperCase();
+        const L = Number(res.left) || 400;
+        const F = Number(res.front) || 400;
+        const R = Number(res.right) || 400;
 
-  $$('.led-card-btn').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.led === effect);
-  });
+        $('radarDistVal').textContent = F;
 
-  if (effect === 'off') {
-    renderLeds(0x00);
-  } else if (effect === 'blink') {
-    let on = false;
-    ledSimInterval = setInterval(() => {
-      on = !on;
-      renderLeds(on ? 0xff : 0x00);
-    }, 300);
-  } else if (effect === 'warn') {
-    let on = false;
-    ledSimInterval = setInterval(() => {
-      on = !on;
-      renderLeds(on ? 0xc3 : 0x00, true);
-    }, 500);
-  } else if (effect === 'pulse') {
-    let p = 0x18;
-    ledSimInterval = setInterval(() => {
-      p = p === 0x18 ? 0x3c : 0x18;
-      renderLeds(p);
-    }, 250);
+        // Position blips
+        const calcBottom = (dist) => `${Math.min(85, Math.max(15, (dist / 400) * 80))}%`;
+        $('blipLeft').style.bottom = calcBottom(L);
+        $('blipFront').style.bottom = calcBottom(F);
+        $('blipRight').style.bottom = calcBottom(R);
+      } catch (e) {
+        $('radarStatusTag').textContent = 'TIMEOUT';
+      }
+    }, 1100);
+  } catch (e) {
+    $('radarStatusTag').textContent = 'FAILED';
   }
-}
+};
 
-$$('[data-led]').forEach((btn) => {
-  btn.onclick = async () => {
-    vibrate(20);
-    const eff = btn.dataset.led;
-    startLedSimulation(eff);
-    await api(`/led?effect=${eff}`).catch(() => {});
+$('sonarToggleBtn').onclick = async () => {
+  vibrate(20);
+  sonarEnabled = !sonarEnabled;
+  const btn = $('sonarToggleBtn');
+  btn.textContent = sonarEnabled ? 'Sonar ON' : 'Sonar OFF';
+  btn.classList.toggle('active', sonarEnabled);
+  await api(`/sonarToggle?mode=${sonarEnabled ? 'on' : 'off'}`).catch(() => {});
+};
+
+// ================= LIVE CAMERA STREAM MODAL =================
+let camTimer = null;
+let camFrameCount = 0;
+let lastFpsTime = performance.now();
+
+$('openCamModalBtn').onclick = () => {
+  $('cameraModal').style.display = 'flex';
+};
+
+$('closeCamModal').onclick = () => {
+  $('cameraModal').style.display = 'none';
+};
+
+function fetchCamFrame() {
+  if (!camOn) return;
+  const img = $('cam');
+  const tempImg = new Image();
+  const frameUrl = `${base}/cam.jpg?t=${Date.now()}`;
+
+  tempImg.onload = () => {
+    img.src = frameUrl;
+    camFrameCount++;
+    const now = performance.now();
+    if (now - lastFpsTime >= 1000) {
+      $('camFpsVal').textContent = camFrameCount;
+      camFrameCount = 0;
+      lastFpsTime = now;
+    }
+    if (camOn) camTimer = setTimeout(fetchCamFrame, 350);
   };
-});
 
-// ================= WI-FI & SAVED NETWORKS =================
-$('wifiScan').onclick = async () => {
+  tempImg.onerror = () => {
+    if (camOn) camTimer = setTimeout(fetchCamFrame, 1000);
+  };
+
+  tempImg.src = frameUrl;
+}
+
+$('camToggleBtn').onclick = () => {
+  camOn = !camOn;
+  vibrate(20);
+  const btn = $('camToggleBtn');
+  const standby = $('camStandby');
+  const badge = $('camStateBadge');
+
+  if (camOn) {
+    btn.textContent = 'Camera OFF';
+    badge.textContent = 'LIVE';
+    badge.style.color = '#10b981';
+    standby.classList.remove('active');
+    fetchCamFrame();
+  } else {
+    btn.textContent = 'Camera ON';
+    badge.textContent = 'OFF';
+    badge.style.color = 'var(--text-dim)';
+    standby.classList.add('active');
+    clearTimeout(camTimer);
+    $('camFpsVal').textContent = '0';
+  }
+};
+
+$('camSnapBtn').onclick = () => {
   vibrate(25);
-  const el = $('networks');
-  el.innerHTML = '<div style="color:var(--neon-cyan)">Scanning nearby Wi-Fi networks...</div>';
-  try {
-    const data = await jsonApi('/wifi/scan');
-    el.innerHTML = '';
-    if (!data.networks || data.networks.length === 0) {
-      el.innerHTML = '<div>No networks discovered.</div>';
-      return;
-    }
-    data.networks.forEach((n) => {
-      const item = document.createElement('div');
-      item.innerHTML = `
-        <span>📶 <b>${n.ssid}</b> <small style="color:var(--text-dim)">(${n.rssi} dBm)</small></span>
-        <button class="save-net-btn">Connect</button>
-      `;
-      item.querySelector('.save-net-btn').onclick = () => {
-        const pass = prompt(`Enter password for "${n.ssid}":`, '');
-        if (pass !== null) {
-          api(
-            `/wifi/save?ssid=${encodeURIComponent(n.ssid)}&password=${encodeURIComponent(pass)}`
-          ).then(loadSavedWifi);
-        }
-      };
-      el.appendChild(item);
-    });
-  } catch (e) {
-    el.innerHTML = '<div style="color:var(--neon-red)">Wi-Fi scan failed. Check connection.</div>';
-  }
-};
-
-async function loadSavedWifi() {
-  try {
-    const data = await jsonApi('/wifi/saved');
-    const el = $('saved');
-    el.innerHTML = '';
-    if (!data.networks || data.networks.length === 0) {
-      el.innerHTML = '<div style="color:var(--text-dim)">No networks saved in ESP32 NVS.</div>';
-      return;
-    }
-    data.networks.forEach((n, i) => {
-      const isSel = i === data.selected;
-      const item = document.createElement('div');
-      item.innerHTML = `
-        <span>${isSel ? '⭐ ' : ''}<b>${n.ssid}</b></span>
-        <span>
-          <button class="use-btn">${isSel ? 'ACTIVE' : 'USE'}</button>
-          <button class="del-btn" style="color:var(--neon-red)">DEL</button>
-        </span>
-      `;
-      item.querySelector('.use-btn').onclick = () => {
-        vibrate(15);
-        api(`/wifi/select?index=${i}`).then(loadSavedWifi);
-      };
-      item.querySelector('.del-btn').onclick = () => {
-        if (confirm(`Delete saved network "${n.ssid}"?`)) {
-          api(`/wifi/delete?index=${i}`).then(loadSavedWifi);
-        }
-      };
-      el.appendChild(item);
-    });
-  } catch (e) {}
-}
-
-$('switchSta').onclick = async () => {
-  vibrate(30);
-  try {
-    const res = await jsonApi('/wifi/switchSta');
-    localStorage.setItem('novaxBase', res.host);
-    base = res.host;
-    $('hostUrlInput').value = res.host;
-    alert(`Switching to STA mode. Connect your phone to "${res.ssid}" then access NovaX at ${res.host}`);
-    setTimeout(updateStatus, 5000);
-  } catch (e) {
-    alert('STA switch failed. Ensure a network is selected in Saved Profiles.');
-  }
-};
-
-$('switchAp').onclick = async () => {
-  vibrate(30);
-  try {
-    await api('/wifi/switchAp');
-    localStorage.setItem('novaxBase', 'http://192.168.4.1');
-    base = 'http://192.168.4.1';
-    $('hostUrlInput').value = base;
-    alert('NovaX switching to AP mode. Connect phone to "NovaX-V2" Wi-Fi.');
-    setTimeout(updateStatus, 3000);
-  } catch (e) {}
-};
-
-// ================= FIRMWARE OTA UPDATER =================
-async function loadOtaStatus() {
-  try {
-    const res = await jsonApi('/ota/status');
-    if (res.version) $('fwVersion').textContent = res.version;
-  } catch (e) {}
-}
-
-$('fwUpdate').onclick = async () => {
-  vibrate(40);
-  const fileInput = $('fwFile');
-  const file = fileInput.files[0];
-  if (!file) {
-    alert('Please select an ESP32 firmware .bin file first.');
+  const img = $('cam');
+  if (!img.src || !camOn) {
+    alert('Turn Camera ON first to take a snapshot.');
     return;
   }
-
-  const token = $('otaTokenInput').value.trim() || 'NovaX-OTA-ChangeMe';
-  if (!confirm(`Warning: NovaX robot will stop and flash "${file.name}". Proceed?`)) return;
-
-  const msgEl = $('fwMsg');
-  msgEl.style.color = 'var(--neon-cyan)';
-  msgEl.textContent = 'Uploading firmware binary to ESP32...';
-
-  try {
-    const res = await api('/ota/update', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/octet-stream',
-        'X-NovaX-OTA': token
-      },
-      body: file,
-      timeout: 60000
-    });
-    const respText = await res.text();
-    if (!res.ok) throw new Error(respText || `Status ${res.status}`);
-    msgEl.style.color = 'var(--neon-green)';
-    msgEl.textContent = 'Upload successful! ESP32 is rebooting. Reconnecting in 8s...';
-    setTimeout(updateStatus, 8000);
-  } catch (err) {
-    msgEl.style.color = 'var(--neon-red)';
-    msgEl.textContent = `OTA Flash Error: ${err.message}`;
-  }
+  const a = document.createElement('a');
+  a.href = img.src;
+  a.download = `novax_${Date.now()}.jpg`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
 };
 
-// ================= HOST MODAL & CONFIG =================
+// ================= SETTINGS & OTA MODAL =================
+$('openSettingsModalBtn').onclick = () => {
+  $('settingsModal').style.display = 'flex';
+};
+
+$('closeSettingsModal').onclick = () => {
+  $('settingsModal').style.display = 'none';
+};
+
 function applyHost(newHost) {
   if (!newHost) return;
   newHost = newHost.trim().replace(/\/+$/, '');
@@ -731,41 +416,24 @@ function applyHost(newHost) {
   base = newHost;
   localStorage.setItem('novaxBase', base);
   $('hostUrlInput').value = base;
-  $('modalHostInput').value = base;
-  setConnectionState('connecting');
   updateStatus();
 }
 
 $('saveHostBtn').onclick = () => {
   vibrate(15);
   applyHost($('hostUrlInput').value);
+  alert(`Connected to ${base}`);
 };
 
-$('hostPillBtn').onclick = () => {
-  $('modalHostInput').value = base;
-  $('hostModal').style.display = 'flex';
-};
-
-$('closeHostModal').onclick = () => {
-  $('hostModal').style.display = 'none';
-};
-
-$('modalSaveHost').onclick = () => {
-  vibrate(15);
-  applyHost($('modalHostInput').value);
-  $('hostModal').style.display = 'none';
-};
-
-$$('.preset-pill, .modal-pill').forEach((pill) => {
+$$('.quick-host-pill').forEach((pill) => {
   pill.onclick = () => {
     vibrate(10);
     applyHost(pill.dataset.ip);
-    $('hostModal').style.display = 'none';
   };
 });
 
-// Fullscreen immersion
-$('btnFullscreen').onclick = () => {
+// Fullscreen
+$('fullscreenBtn').onclick = () => {
   vibrate(15);
   if (!document.fullscreenElement) {
     document.documentElement.requestFullscreen().catch(() => {});
@@ -774,130 +442,157 @@ $('btnFullscreen').onclick = () => {
   }
 };
 
-// ================= PWA INSTALLATION =================
-window.addEventListener('beforeinstallprompt', (e) => {
-  e.preventDefault();
-  deferredInstallPrompt = e;
-  const pwaBtn = $('pwaInstallBtn');
-  if (pwaBtn) pwaBtn.style.display = 'block';
-});
-
-$('pwaInstallBtn').onclick = async () => {
-  vibrate(20);
-  if (deferredInstallPrompt) {
-    deferredInstallPrompt.prompt();
-    const { outcome } = await deferredInstallPrompt.userChoice;
-    if (outcome === 'accepted') {
-      $('pwaInstallBtn').style.display = 'none';
+// Wi-Fi Management
+$('scanWifiBtn').onclick = async () => {
+  vibrate(25);
+  const el = $('wifiNetworksList');
+  el.innerHTML = '<div style="color:var(--color-teal)">Scanning Wi-Fi...</div>';
+  try {
+    const data = await jsonApi('/wifi/scan');
+    el.innerHTML = '';
+    if (!data.networks || data.networks.length === 0) {
+      el.innerHTML = '<div>No networks found.</div>';
+      return;
     }
-    deferredInstallPrompt = null;
-  } else {
-    alert('To install NovaX on your phone:\n- On Android: Tap browser menu (⋮) -> "Add to Home screen" or "Install App".\n- On iOS: Tap Share button -> "Add to Home Screen".');
+    data.networks.forEach((n) => {
+      const item = document.createElement('div');
+      item.innerHTML = `
+        <span>📶 <b>${n.ssid}</b> (${n.rssi} dBm)</span>
+        <button class="pill-btn blue" style="padding:2px 8px;font-size:0.68rem">Save</button>
+      `;
+      item.querySelector('button').onclick = () => {
+        const pass = prompt(`Password for "${n.ssid}":`, '');
+        if (pass !== null) {
+          api(`/wifi/save?ssid=${encodeURIComponent(n.ssid)}&password=${encodeURIComponent(pass)}`)
+            .then(loadSavedWifi);
+        }
+      };
+      el.appendChild(item);
+    });
+  } catch (e) {
+    el.innerHTML = '<div style="color:var(--color-red)">Wi-Fi scan failed.</div>';
   }
 };
 
-// ================= BOTTOM TAB NAVIGATION =================
-$$('.nav-item').forEach((item) => {
-  item.onclick = () => {
-    vibrate(15);
-    const targetView = item.dataset.view;
-    if (targetView === currentTab) return;
-
-    $$('.nav-item').forEach((btn) => btn.classList.remove('active'));
-    item.classList.add('active');
-
-    $$('.view-panel').forEach((panel) => panel.classList.remove('active'));
-    $(targetView).classList.add('active');
-    currentTab = targetView;
-
-    if (targetView === 'view-path') {
-      setTimeout(resizeCanvas, 50);
+async function loadSavedWifi() {
+  try {
+    const data = await jsonApi('/wifi/saved');
+    const el = $('savedWifiList');
+    el.innerHTML = '';
+    if (!data.networks || data.networks.length === 0) {
+      el.innerHTML = '<div>No networks saved.</div>';
+      return;
     }
-  };
-});
+    data.networks.forEach((n, i) => {
+      const isSel = i === data.selected;
+      const item = document.createElement('div');
+      item.innerHTML = `
+        <span>${isSel ? '⭐ ' : ''}<b>${n.ssid}</b></span>
+        <span>
+          <button class="pill-btn" style="padding:2px 6px;font-size:0.65rem">${isSel ? 'USE' : 'Use'}</button>
+          <button class="pill-btn red" style="padding:2px 6px;font-size:0.65rem">Del</button>
+        </span>
+      `;
+      item.querySelectorAll('button')[0].onclick = () => api(`/wifi/select?index=${i}`).then(loadSavedWifi);
+      item.querySelectorAll('button')[1].onclick = () => {
+        if (confirm(`Delete ${n.ssid}?`)) api(`/wifi/delete?index=${i}`).then(loadSavedWifi);
+      };
+      el.appendChild(item);
+    });
+  } catch (e) {}
+}
 
-window.addEventListener('resize', () => {
-  if (currentTab === 'view-path') resizeCanvas();
-});
+$('switchStaBtn').onclick = async () => {
+  vibrate(25);
+  try {
+    const res = await jsonApi('/wifi/switchSta');
+    applyHost(res.host);
+    alert(`Switched to STA mode. Connect phone to ${res.ssid} then use ${res.host}`);
+  } catch (e) {
+    alert('STA switch failed.');
+  }
+};
+
+$('switchApBtn').onclick = async () => {
+  vibrate(25);
+  try {
+    await api('/wifi/switchAp');
+    applyHost('http://192.168.4.1');
+    alert('Switched to AP mode. Connect to NovaX-V2.');
+  } catch (e) {}
+};
+
+// Firmware OTA
+$('fwUpdateBtn').onclick = async () => {
+  vibrate(35);
+  const file = $('fwFileInput').files[0];
+  if (!file) {
+    alert('Select an ESP32 .bin file first.');
+    return;
+  }
+  const token = $('otaTokenInput').value.trim() || 'NovaX-OTA-ChangeMe';
+  if (!confirm(`Flash "${file.name}" to ESP32? Robot will stop and restart.`)) return;
+
+  const msg = $('fwMsg');
+  msg.textContent = 'Uploading firmware...';
+  try {
+    const res = await api('/ota/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-NovaX-OTA': token },
+      body: file,
+      timeout: 60000
+    });
+    if (!res.ok) throw new Error(await res.text());
+    msg.textContent = 'Upload successful! ESP32 restarting...';
+  } catch (err) {
+    msg.textContent = `OTA Error: ${err.message}`;
+  }
+};
 
 // ================= GITHUB APP UPDATER SYSTEM =================
 const CURRENT_APP_VERSION = '2.2.0';
 
 function getGitHubConfig() {
-  const repoInput = $('ghRepoInput');
-  const branchInput = $('ghBranchInput');
-  const repo = repoInput ? repoInput.value.trim() : localStorage.getItem('novax_gh_repo') || 'onebotyt/robocar';
-  const branch = branchInput ? branchInput.value.trim() || 'main' : localStorage.getItem('novax_gh_branch') || 'main';
-  return { repo, branch };
+  const repo = $('ghRepoInput')?.value.trim() || localStorage.getItem('novax_gh_repo') || 'onebotyt/robocar';
+  return { repo, branch: 'main' };
 }
 
 function setUpdateLog(msg, append = true) {
-  const box = $('updateLog');
+  const box = $('updateLogBox');
   if (!box) return;
   box.style.display = 'block';
-  if (append && box.textContent) {
-    box.textContent += '\n' + msg;
-  } else {
-    box.textContent = msg;
-  }
+  box.textContent = append && box.textContent ? box.textContent + '\n' + msg : msg;
   box.scrollTop = box.scrollHeight;
-}
-
-function showUpdateBanner(ver, changelog) {
-  const banner = $('appUpdateBanner');
-  if (!banner) return;
-  $('updateBannerTitle').textContent = `NovaX v${ver} Ready`;
-  if (changelog) $('updateBannerDesc').textContent = changelog;
-  banner.style.display = 'flex';
-}
-
-function hideUpdateBanner() {
-  const banner = $('appUpdateBanner');
-  if (banner) banner.style.display = 'none';
 }
 
 async function checkGithubUpdates(interactive = true) {
   const { repo, branch } = getGitHubConfig();
-
-  if (!repo) {
-    if (interactive) {
-      alert('Please enter your GitHub repository first (e.g. username/NovaX_PWA_OTA_V2).');
-      $('ghRepoInput')?.focus();
-    }
-    return null;
-  }
-
-  // Persist repo & branch in localStorage
   localStorage.setItem('novax_gh_repo', repo);
-  localStorage.setItem('novax_gh_branch', branch);
 
   const activeVer = localStorage.getItem('novax_hot_version') || CURRENT_APP_VERSION;
-  setUpdateLog(`🔍 Checking GitHub for updates (${repo}@${branch})...`, false);
-
-  const rawUrl = `https://raw.githubusercontent.com/${repo}/${branch}/pwa/version.json?t=${Date.now()}`;
+  setUpdateLog(`Checking GitHub (${repo}@${branch})...`, false);
 
   try {
-    const res = await fetch(rawUrl, { cache: 'no-store' });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: version.json not found on ${branch} branch`);
+    const res = await fetch(`https://raw.githubusercontent.com/${repo}/${branch}/pwa/version.json?t=${Date.now()}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-
     const remoteVer = (data.version || '').trim();
     $('remoteAppVer').textContent = `v${remoteVer}`;
 
     if (remoteVer && remoteVer !== activeVer) {
-      setUpdateLog(`✨ New version found: v${remoteVer} (Installed: v${activeVer})`);
-      setUpdateLog(`Changelog: ${data.changelog || 'Latest features & optimizations'}`);
-      showUpdateBanner(remoteVer, data.changelog);
-      $('hotUpdateBtn').classList.add('pulse-glow');
+      setUpdateLog(`New version: v${remoteVer} (Current: v${activeVer})`);
+      $('appUpdateBanner').style.display = 'flex';
+      $('updateBannerTitle').textContent = `NovaX v${remoteVer} Ready`;
+      if (data.changelog) $('updateBannerDesc').textContent = data.changelog;
       return data;
     } else {
-      setUpdateLog(`✅ Up to date! You are running the latest version (v${activeVer}).`);
+      setUpdateLog(`Up to date (v${activeVer})`);
       if (interactive) alert(`NovaX is up to date (v${activeVer})!`);
       return null;
     }
   } catch (err) {
-    setUpdateLog(`❌ Update check failed: ${err.message}`);
-    if (interactive) alert(`GitHub update check error: ${err.message}\nMake sure your phone has internet and repo name is correct.`);
+    setUpdateLog(`Update check failed: ${err.message}`);
+    if (interactive) alert(`Update check error: ${err.message}`);
     return null;
   }
 }
@@ -905,114 +600,81 @@ async function checkGithubUpdates(interactive = true) {
 async function hotUpdateApp() {
   vibrate(30);
   const { repo, branch } = getGitHubConfig();
-  if (!repo) {
-    alert('Please enter your GitHub repository (e.g. username/NovaX_PWA_OTA_V2).');
-    return;
-  }
-
   const baseUrl = `https://raw.githubusercontent.com/${repo}/${branch}/pwa`;
-  setUpdateLog('🚀 Starting Hot Update from GitHub...', false);
+  setUpdateLog('Starting Hot Update from GitHub...', false);
 
   try {
-    // 1. Fetch version.json
-    setUpdateLog('1/3 Fetching version manifest...');
+    setUpdateLog('1/3 Fetching version.json...');
     const verRes = await fetch(`${baseUrl}/version.json?t=${Date.now()}`, { cache: 'no-store' });
-    if (!verRes.ok) throw new Error(`Failed to fetch version.json (${verRes.status})`);
     const verData = await verRes.json();
     const newVer = verData.version || '2.2.0';
 
-    // 2. Fetch style.css
-    setUpdateLog('2/3 Downloading latest style.css...');
+    setUpdateLog('2/3 Downloading style.css...');
     const cssRes = await fetch(`${baseUrl}/style.css?t=${Date.now()}`, { cache: 'no-store' });
-    if (!cssRes.ok) throw new Error(`Failed to fetch style.css (${cssRes.status})`);
     const cssText = await cssRes.text();
-    if (cssText.length < 200) throw new Error('Downloaded style.css is incomplete');
 
-    // 3. Fetch app.js
-    setUpdateLog('3/3 Downloading latest app.js...');
+    setUpdateLog('3/3 Downloading app.js...');
     const jsRes = await fetch(`${baseUrl}/app.js?t=${Date.now()}`, { cache: 'no-store' });
-    if (!jsRes.ok) throw new Error(`Failed to fetch app.js (${jsRes.status})`);
     const jsText = await jsRes.text();
-    if (jsText.length < 200) throw new Error('Downloaded app.js is incomplete');
 
-    // Save into persistent localStorage
     localStorage.setItem('novax_hot_version', newVer);
     localStorage.setItem('novax_hot_css', cssText);
     localStorage.setItem('novax_hot_js', jsText);
-    localStorage.setItem('novax_hot_date', new Date().toISOString());
 
-    setUpdateLog(`🎉 Update installed successfully! Reloading NovaX v${newVer}...`);
-    vibrate(50);
-
-    setTimeout(() => {
-      window.location.reload();
-    }, 1200);
+    setUpdateLog(`Installed! Reloading NovaX v${newVer}...`);
+    vibrate(40);
+    setTimeout(() => window.location.reload(), 1200);
   } catch (err) {
-    setUpdateLog(`❌ Hot update failed: ${err.message}`);
-    alert(`Hot Update Error:\n${err.message}`);
+    setUpdateLog(`Update failed: ${err.message}`);
+    alert(`Update Error: ${err.message}`);
   }
 }
 
 function factoryResetApp() {
   vibrate(25);
-  if (!confirm('Revert NovaX back to the factory bundled code? This will clear any hot-updated code downloaded from GitHub.')) return;
+  if (!confirm('Revert back to the factory bundled APK code?')) return;
   localStorage.removeItem('novax_hot_version');
   localStorage.removeItem('novax_hot_css');
   localStorage.removeItem('novax_hot_js');
-  localStorage.removeItem('novax_hot_date');
-  alert('App reset to factory bundle. Reloading...');
+  alert('Reset to bundle. Reloading...');
   window.location.reload();
 }
 
-function downloadLatestApk() {
-  vibrate(20);
-  const { repo } = getGitHubConfig();
-  if (repo) {
-    window.open(`https://github.com/${repo}/releases/latest`, '_blank');
-  } else {
-    alert('Please enter your GitHub repository first.');
-  }
-}
-
-// Wire up GitHub Update Buttons
 $('checkGhUpdateBtn').onclick = () => checkGithubUpdates(true);
 $('hotUpdateBtn').onclick = hotUpdateApp;
 $('factoryResetAppBtn').onclick = factoryResetApp;
-$('downloadApkBtn').onclick = downloadLatestApk;
+$('downloadApkBtn').onclick = () => {
+  const { repo } = getGitHubConfig();
+  window.open(`https://github.com/${repo}/releases/latest`, '_blank');
+};
 
 $('bannerUpdateBtn').onclick = () => {
-  hideUpdateBanner();
+  $('appUpdateBanner').style.display = 'none';
   hotUpdateApp();
 };
-$('bannerDismissBtn').onclick = hideUpdateBanner;
+$('bannerDismissBtn').onclick = () => {
+  $('appUpdateBanner').style.display = 'none';
+};
 
 // ================= INITIALIZATION =================
 window.addEventListener('DOMContentLoaded', () => {
   $('hostUrlInput').value = base;
 
-  // Initialize GitHub Updater fields
   const savedRepo = localStorage.getItem('novax_gh_repo') || 'onebotyt/robocar';
-  const savedBranch = localStorage.getItem('novax_gh_branch') || 'main';
   if ($('ghRepoInput')) $('ghRepoInput').value = savedRepo;
-  if ($('ghBranchInput')) $('ghBranchInput').value = savedBranch;
 
   const activeVer = localStorage.getItem('novax_hot_version') || CURRENT_APP_VERSION;
   $('installedAppVer').textContent = `v${activeVer}`;
-  $('appVersionBadge').textContent = `v${activeVer}`;
-
-  const isHot = Boolean(localStorage.getItem('novax_hot_js'));
-  const srcTag = $('codeSourceTag');
-  if (srcTag) {
-    srcTag.textContent = isHot ? 'GitHub Hot-OTA (Active)' : 'Native APK Bundle';
-    if (isHot) srcTag.style.color = 'var(--neon-green)';
-  }
 
   loadSavedWifi();
-  loadOtaStatus();
   updateStatus();
   setInterval(updateStatus, 1200);
 
-  // Silently check GitHub for updates on startup if internet is available
+  window.addEventListener('resize', () => {
+    if (isDrawMode) resizeCanvas();
+  });
+
+  // Check GitHub updates on startup if online
   if (navigator.onLine && savedRepo) {
     setTimeout(() => checkGithubUpdates(false), 2500);
   }
@@ -1022,4 +684,3 @@ window.addEventListener('DOMContentLoaded', () => {
     navigator.serviceWorker.register('./sw.js').catch(() => {});
   }
 });
-
