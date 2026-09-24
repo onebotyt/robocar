@@ -129,11 +129,11 @@
           </div>
         </div>
 
-        <!-- BOTTOM BUTTONS: DRAW MODE, CLEAR, SEND PATH -->
+        <!-- BOTTOM BUTTONS: DRAW MODE, CLEAR, SEND PATH (CLEAR & SEND SHOWN ONLY IN CANVAS MODE) -->
         <div class="controls-action-row">
           <button id="drawModeBtn" class="pill-btn outline">Draw Mode</button>
-          <button id="clearBtn" class="pill-btn">Clear</button>
-          <button id="sendPathBtn" class="pill-btn blue">Send Path</button>
+          <button id="clearBtn" class="pill-btn" style="display:none;">Clear</button>
+          <button id="sendPathBtn" class="pill-btn blue" style="display:none;">Send Path</button>
         </div>
       </section>
 
@@ -198,10 +198,15 @@
           </div>
         </div>
 
-        <!-- Radar Action Buttons -->
-        <div class="radar-action-row">
-          <button id="scanBtn" class="pill-btn blue">Scan</button>
-          <button id="sonarToggleBtn" class="pill-btn active">Sonar ON</button>
+        <!-- Servo Head Pan & Radar Scan (<  SCAN  >) -->
+        <div class="servo-control-row">
+          <button id="servoLeftBtn" class="servo-btn" title="Pan Head Left" aria-label="Pan Head Left">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M15 18l-6-6 6-6v12z"/></svg>
+          </button>
+          <button id="scanBtn" class="servo-scan-btn">SCAN</button>
+          <button id="servoRightBtn" class="servo-btn" title="Pan Head Right" aria-label="Pan Head Right">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M9 6l6 6-6 6V6z"/></svg>
+          </button>
         </div>
 
         <!-- Rotation Section (Moved Below Radar) -->

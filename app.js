@@ -269,6 +269,13 @@ function handleWsPayload(data) {
       // Heartbeat acknowledgment
       break;
 
+    case 'servo_pos':
+      if (data.angle !== undefined) currentServoAngle = Number(data.angle);
+      if (data.distance !== undefined && $('radarDistVal')) {
+        $('radarDistVal').textContent = data.distance;
+      }
+      break;
+
     case 'mode':
       if (data.value) {
         currentMode = data.value;
@@ -527,6 +534,8 @@ if ($('drawModeBtn')) {
     const canvasView = $('canvasView');
     const modeTag = $('controlModeTag');
     const btn = $('drawModeBtn');
+    const clearBtn = $('clearBtn');
+    const sendPathBtn = $('sendPathBtn');
 
     if (isDrawMode) {
       if (dpadView) dpadView.style.display = 'none';
@@ -536,6 +545,8 @@ if ($('drawModeBtn')) {
         btn.textContent = 'Drive Mode';
         btn.classList.add('active');
       }
+      if (clearBtn) clearBtn.style.display = 'inline-flex';
+      if (sendPathBtn) sendPathBtn.style.display = 'inline-flex';
       setTimeout(resizeCanvas, 50);
     } else {
       if (canvasView) canvasView.style.display = 'none';
@@ -545,6 +556,8 @@ if ($('drawModeBtn')) {
         btn.textContent = 'Draw Mode';
         btn.classList.remove('active');
       }
+      if (clearBtn) clearBtn.style.display = 'none';
+      if (sendPathBtn) sendPathBtn.style.display = 'none';
     }
   };
 }
@@ -645,18 +658,33 @@ if ($('scanBtn')) {
   };
 }
 
-if ($('sonarToggleBtn')) {
-  $('sonarToggleBtn').onclick = async () => {
-    vibrate(20);
-    sonarEnabled = !sonarEnabled;
-    const btn = $('sonarToggleBtn');
-    btn.textContent = sonarEnabled ? 'Sonar ON' : 'Sonar OFF';
-    btn.classList.toggle('active', sonarEnabled);
+// ================= SERVO MOTOR HEAD CONTROLS (<  SCAN  >) =================
+let currentServoAngle = 90; // Default center 90° (0° = Left, 180° = Right)
 
-    const sent = sendWs({ type: 'sonar', state: sonarEnabled ? 'on' : 'off' });
-    if (!sent) {
-      await api(`/sonarToggle?mode=${sonarEnabled ? 'on' : 'off'}`).catch(() => {});
-    }
+function setServoAngle(angle) {
+  angle = Math.max(0, Math.min(180, angle));
+  currentServoAngle = angle;
+
+  // 1. Try WebSocket
+  const sent = sendWs({ type: 'servo', angle: currentServoAngle });
+
+  // 2. HTTP Fallback
+  if (!sent) {
+    api(`/servo?angle=${currentServoAngle}`).catch(() => {});
+  }
+}
+
+if ($('servoLeftBtn')) {
+  $('servoLeftBtn').onclick = () => {
+    vibrate(15);
+    setServoAngle(currentServoAngle - 15);
+  };
+}
+
+if ($('servoRightBtn')) {
+  $('servoRightBtn').onclick = () => {
+    vibrate(15);
+    setServoAngle(currentServoAngle + 15);
   };
 }
 

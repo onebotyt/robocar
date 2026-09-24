@@ -76,15 +76,15 @@ Requests the SG90 servo to sweep the HC-SR04 ultrasonic sensor from -90° to +90
 }
 ```
 
-### 2.7 Ultrasonic Sensor Enable / Disable
-Enables or disables the HC-SR04 sensor pinging.
+### 2.7 Manual Servo Head Angle Command (<  SCAN  >)
+Positions the SG90 servo panning head (mounting the HC-SR04 sonar and OV7670 camera) to a specific angle between 0° and 180° (90° = Center).
 ```json
 {
-  "type": "sonar",
-  "state": "on"
+  "type": "servo",
+  "angle": 105
 }
 ```
-- `"state"` (string): `"on"` or `"off"`.
+- `"angle"` (integer, required): Target angle from `0` (full left) to `180` (full right). Center is `90`.
 
 ### 2.8 Path Waypoint Execution (Draw Mode)
 Transmits drawn trajectory points to the ESP32.

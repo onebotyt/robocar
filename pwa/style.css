@@ -65,10 +65,12 @@ html, body {
 /* ================= TOP NAV BAR ================= */
 .top-nav-bar {
   flex-shrink: 0;
+  height: 36px;
+  min-height: 36px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: calc(var(--safe-top) + 6px) 14px 6px;
+  padding: 0 12px;
   background: rgba(5, 20, 27, 0.95);
   border-bottom: 1px solid var(--border-card);
   z-index: 10;
@@ -77,12 +79,12 @@ html, body {
 .top-brand {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .brand-dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--color-red);
   box-shadow: 0 0 6px var(--color-red);
@@ -96,26 +98,26 @@ html, body {
 
 .brand-name {
   font-family: var(--font-hero);
-  font-size: 1.15rem;
+  font-size: 1rem;
   font-weight: 700;
-  letter-spacing: 1.5px;
+  letter-spacing: 1.2px;
   color: #ffffff;
 }
 
 .brand-ver {
-  font-size: 0.68rem;
+  font-size: 0.62rem;
   color: var(--color-teal);
   background: rgba(0, 191, 165, 0.12);
-  padding: 2px 6px;
+  padding: 1px 5px;
   border-radius: 4px;
   border: 1px solid rgba(0, 191, 165, 0.3);
 }
 
 .comm-badge {
-  font-size: 0.65rem;
+  font-size: 0.6rem;
   font-weight: 700;
   letter-spacing: 0.5px;
-  padding: 2px 6px;
+  padding: 1px 5px;
   border-radius: 4px;
   border: 1px solid rgba(255, 255, 255, 0.15);
   background: rgba(255, 255, 255, 0.05);
@@ -139,20 +141,21 @@ html, body {
 .top-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .top-btn {
   background: var(--bg-btn-dark);
   border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  padding: 5px 10px;
+  border-radius: 6px;
+  padding: 3px 8px;
+  height: 26px;
   color: var(--text-main);
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   font-weight: 600;
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   cursor: pointer;
   transition: all 0.15s;
 }
@@ -165,9 +168,9 @@ html, body {
 .top-icon-btn {
   background: var(--bg-btn-dark);
   border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  width: 30px;
-  height: 30px;
+  border-radius: 6px;
+  width: 26px;
+  height: 26px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -247,25 +250,16 @@ html, body {
 .cockpit-container {
   flex: 1;
   display: grid;
-  gap: 12px;
-  padding: 10px 12px calc(var(--safe-bottom) + 10px);
-  overflow-y: auto;
-  overflow-x: hidden;
-  -webkit-overflow-scrolling: touch;
+  gap: 8px;
+  padding: 6px 10px calc(var(--safe-bottom) + 6px);
+  overflow: hidden;
+  min-height: 0;
+  height: calc(100% - 36px);
+  grid-template-columns: 1fr 1.05fr 1fr;
+  align-items: stretch;
 }
 
-/* Landscape Mode (Horizontal Phone Screen - Primary Gamepad View) */
-@media (min-width: 680px) or (orientation: landscape) {
-  .cockpit-container {
-    grid-template-columns: 1fr 1.05fr 1fr;
-    align-items: stretch;
-    padding: 8px 14px calc(var(--safe-bottom) + 8px);
-    overflow: hidden;
-  }
-}
-
-/* Portrait Mode (Vertical Phone Screen) */
-@media (max-width: 679px) and (orientation: portrait) {
+@media (max-width: 600px) and (orientation: portrait) {
   .cockpit-container {
     grid-template-columns: 1fr;
     grid-auto-rows: auto;
@@ -277,37 +271,40 @@ html, body {
 .card {
   background: var(--bg-card);
   border: 1px solid var(--border-card);
-  border-radius: 16px;
-  padding: 12px;
+  border-radius: 12px;
+  padding: 8px 10px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
   position: relative;
   min-height: 0;
+  height: 100%;
+  overflow: hidden;
 }
 
 .card-header-simple {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 8px;
+  margin-bottom: 4px;
+  flex-shrink: 0;
 }
 
 .card-title {
-  font-size: 1rem;
+  font-size: 0.88rem;
   font-weight: 700;
   color: #f1f8fa;
   letter-spacing: 0.3px;
 }
 
 .card-mode-tag {
-  font-size: 0.65rem;
+  font-size: 0.6rem;
   font-weight: 700;
   color: var(--color-teal);
   background: rgba(0, 191, 165, 0.12);
-  padding: 2px 7px;
-  border-radius: 5px;
+  padding: 1px 6px;
+  border-radius: 4px;
   border: 1px solid rgba(0, 191, 165, 0.25);
 }
 
@@ -317,7 +314,7 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 190px;
+  min-height: 0;
   position: relative;
   touch-action: none;
 }
@@ -335,26 +332,26 @@ html, body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: 5px;
 }
 
 .dpad-mid-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 5px;
 }
 
 .dpad-btn {
-  width: 58px;
-  height: 58px;
+  width: 48px;
+  height: 48px;
   border: none;
-  border-radius: 14px;
+  border-radius: 12px;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   transition: transform 0.08s, filter 0.08s;
-  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.35);
   touch-action: none;
 }
 
@@ -364,8 +361,8 @@ html, body {
 }
 
 .dpad-teal svg {
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 20px;
 }
 
 .dpad-teal:active, .dpad-teal.active {
@@ -381,8 +378,8 @@ html, body {
 }
 
 .stop-box-icon {
-  width: 18px;
-  height: 18px;
+  width: 14px;
+  height: 14px;
   background: #ffffff;
   border-radius: 3px;
 }
@@ -397,10 +394,10 @@ html, body {
   position: relative;
   width: 100%;
   height: 100%;
-  min-height: 190px;
+  min-height: 140px;
   background: #030c12;
   border: 1px solid var(--border-subtle);
-  border-radius: 12px;
+  border-radius: 10px;
   overflow: hidden;
   touch-action: none;
 }
@@ -435,9 +432,16 @@ html, body {
 .controls-action-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 6px;
-  margin-top: 10px;
+  margin-top: 4px;
+  flex-shrink: 0;
+}
+
+.controls-action-row .pill-btn {
+  flex: 1;
+  padding: 4px 8px;
+  height: 28px;
+  font-size: 0.72rem;
 }
 
 /* ================= 2. CENTER CARD: NOVA X (LIVE CAM & CONTROLS) ================= */
@@ -449,9 +453,9 @@ html, body {
 
 .card-hero-title {
   font-family: var(--font-hero);
-  font-size: 1.25rem;
+  font-size: 0.95rem;
   font-weight: 800;
-  letter-spacing: 1.5px;
+  letter-spacing: 1.2px;
   color: #ffffff;
 }
 
@@ -459,19 +463,20 @@ html, body {
 .center-cam-wrapper {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin: 6px 0 10px 0;
+  gap: 4px;
+  margin: 2px 0;
   flex: 1;
   justify-content: center;
+  min-height: 0;
 }
 
 .center-cam-wrapper .cam-feed-container {
   width: 100%;
   aspect-ratio: 16 / 10;
-  min-height: 140px;
-  max-height: 180px;
+  min-height: 0;
+  max-height: 120px;
   background: #02070d;
-  border-radius: 10px;
+  border-radius: 8px;
   overflow: hidden;
   border: 1px solid var(--border-subtle);
   position: relative;
@@ -480,28 +485,37 @@ html, body {
 .cam-action-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.cam-action-row .pill-btn {
+  padding: 4px 6px;
+  height: 26px;
+  font-size: 0.7rem;
 }
 
 /* Hero Mode & Stop Row */
 .hero-actions-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  margin-top: 4px;
+  gap: 6px;
+  margin-top: 2px;
+  flex-shrink: 0;
 }
 
 .hero-btn {
   border: none;
-  border-radius: 12px;
-  padding: 10px 14px;
+  border-radius: 9px;
+  padding: 5px 8px;
+  height: 32px;
   font-family: var(--font-hero);
-  font-size: 1.05rem;
+  font-size: 0.95rem;
   font-weight: 700;
-  letter-spacing: 1px;
+  letter-spacing: 0.8px;
   color: #ffffff;
   cursor: pointer;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.3);
   transition: transform 0.1s, filter 0.1s;
 }
 
@@ -515,21 +529,31 @@ html, body {
 
 /* Control Groups (Rotation & LEDs) */
 .control-group {
-  margin-top: 6px;
+  margin-top: 2px;
   text-align: left;
+  flex-shrink: 0;
 }
 
 .group-title {
-  font-size: 0.8rem;
-  font-weight: 600;
+  font-size: 0.65rem;
+  font-weight: 700;
   color: var(--text-dim);
-  margin-bottom: 6px;
+  margin-bottom: 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .pill-row {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  gap: 4px;
+}
+
+.pill-row .pill-btn {
+  flex: 1;
+  padding: 2px 4px;
+  height: 23px;
+  font-size: 0.66rem;
+  border-radius: 6px;
 }
 
 /* ================= 3. RADAR CARD ================= */
@@ -537,6 +561,8 @@ html, body {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
+  gap: 3px;
+  overflow: hidden;
 }
 
 .radar-scope-box {
@@ -544,22 +570,23 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 4px 0;
-  min-height: 180px;
+  padding: 0;
+  min-height: 0;
+  max-height: 75px;
 }
 
 .radar-arc-screen {
   position: relative;
   width: 100%;
-  max-width: 240px;
-  aspect-ratio: 2 / 1;
-  border: 2px solid var(--color-blue);
+  max-width: 150px;
+  height: 70px;
+  border: 1.5px solid var(--color-blue);
   border-bottom: none;
-  border-top-left-radius: 150px;
-  border-top-right-radius: 150px;
+  border-top-left-radius: 80px;
+  border-top-right-radius: 80px;
   background: radial-gradient(circle at 50% 100%, #0e3748 0%, #04141c 70%);
   overflow: hidden;
-  box-shadow: inset 0 0 16px rgba(2, 132, 199, 0.25);
+  box-shadow: inset 0 0 12px rgba(2, 132, 199, 0.25);
 }
 
 .radar-curve {
@@ -569,7 +596,7 @@ html, body {
   transform: translateX(-50%);
   border: 1px dashed rgba(2, 132, 199, 0.3);
   border-bottom: none;
-  border-radius: 150px 150px 0 0;
+  border-radius: 80px 80px 0 0;
 }
 .curve-outer { width: 90%; height: 90%; }
 .curve-mid { width: 62%; height: 62%; }
@@ -596,25 +623,25 @@ html, body {
 
 .radar-center-readout {
   position: absolute;
-  bottom: 6px;
+  bottom: 2px;
   left: 50%;
   transform: translateX(-50%);
-  font-size: 0.85rem;
+  font-size: 0.7rem;
   font-weight: 700;
   color: #ffffff;
-  background: rgba(4, 18, 25, 0.75);
-  padding: 2px 8px;
-  border-radius: 6px;
+  background: rgba(4, 18, 25, 0.85);
+  padding: 1px 6px;
+  border-radius: 4px;
   white-space: nowrap;
 }
 
 .radar-blip {
   position: absolute;
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: var(--color-red);
-  box-shadow: 0 0 8px var(--color-red);
+  box-shadow: 0 0 6px var(--color-red);
   transform: translate(-50%, 50%);
   display: flex;
   align-items: center;
@@ -623,9 +650,6 @@ html, body {
 }
 
 .radar-blip span {
-  font-size: 0.55rem;
-  font-weight: 800;
-  color: #ffffff;
   display: none;
 }
 
@@ -633,11 +657,57 @@ html, body {
 #blipFront { left: 50%; bottom: 60%; }
 #blipRight { left: 76%; bottom: 35%; }
 
-.radar-action-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin-top: 10px;
+/* Servo Arrow Controls (<  SCAN  >) */
+.servo-control-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.servo-btn {
+  width: 32px;
+  height: 26px;
+  background: var(--bg-btn-dark);
+  border: 1px solid var(--border-pill);
+  border-radius: 6px;
+  color: #38bdf8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.12s;
+  flex-shrink: 0;
+}
+
+.servo-btn:active {
+  background: var(--color-blue);
+  color: #ffffff;
+  transform: scale(0.92);
+}
+
+.servo-scan-btn {
+  flex: 1;
+  height: 26px;
+  background: var(--color-blue);
+  border: 1px solid var(--color-blue);
+  border-radius: 6px;
+  color: #ffffff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.servo-scan-btn:active {
+  filter: brightness(1.15);
+  transform: scale(0.96);
 }
 
 /* ================= PILL BUTTONS (COMMON) ================= */

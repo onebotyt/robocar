@@ -625,9 +625,21 @@ void handleWsMessage(WiFiClient& client, const String& msg) {
     radarServo.attach(SERVO_PIN, 500, 2400);
     lastRadarStepMs = millis();
   }
-  // 7. Sonar Enable Toggle
-  else if (msg.indexOf("\"type\":\"sonar\"") >= 0) {
-    sonarActive = (msg.indexOf("\"state\":\"on\"") >= 0);
+  // 7. Manual Servo Head Angle Command (<  SCAN  >)
+  else if (msg.indexOf("\"type\":\"servo\"") >= 0) {
+    radarState = SCAN_IDLE;
+    int angIdx = msg.indexOf("\"angle\":");
+    if (angIdx >= 0) {
+      int ang = msg.substring(angIdx + 8).toInt();
+      if (ang < 0) ang = 0;
+      if (ang > 180) ang = 180;
+      if (!radarServo.attached()) {
+        radarServo.attach(SERVO_PIN, 500, 2400);
+      }
+      radarServo.write(ang);
+      long dist = readUltrasonicCM();
+      broadcastWsText("{\"type\":\"servo_pos\",\"angle\":" + String(ang) + ",\"distance\":" + String(dist) + "}");
+    }
   }
   // 8. Ping / Heartbeat
   else if (msg.indexOf("\"type\":\"ping\"") >= 0) {
@@ -1065,6 +1077,23 @@ void setup() {
   restServer.on("/status", handleStatus);
   restServer.on("/path", HTTP_POST, handlePathUpload);
   restServer.on("/cam.jpg", handleCameraSnapshot);
+  restServer.on("/servo", HTTP_GET, []() {
+    setCorsHeaders();
+    if (restServer.hasArg("angle")) {
+      int ang = restServer.arg("angle").toInt();
+      if (ang < 0) ang = 0;
+      if (ang > 180) ang = 180;
+      radarState = SCAN_IDLE;
+      if (!radarServo.attached()) {
+        radarServo.attach(SERVO_PIN, 500, 2400);
+      }
+      radarServo.write(ang);
+      long dist = readUltrasonicCM();
+      restServer.send(200, "application/json", "{\"status\":\"ok\",\"angle\":" + String(ang) + ",\"distance\":" + String(dist) + "}");
+    } else {
+      restServer.send(400, "text/plain", "Missing angle parameter");
+    }
+  });
   restServer.on("/ota/status", handleFirmwareInfo);
   restServer.on("/ota/update", HTTP_POST, handleOtaFinish, handleOtaUpload);
 
