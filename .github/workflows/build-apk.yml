@@ -1,10 +1,11 @@
-name: Build NovaX Android APK
+name: Build NovaX Android APK & ESP32 Firmware
 
 on:
   push:
     branches: [ "main", "master" ]
     paths-ignore:
       - 'apk/**'
+      - 'firmware/*.bin'
       - '*.md'
       - 'docs/**'
     tags: [ "v*" ]
@@ -15,7 +16,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Android APK
+    name: Build APK & Firmware
     runs-on: ubuntu-latest
 
     steps:
@@ -30,6 +31,51 @@ jobs:
 
       - name: Install Dependencies
         run: npm ci
+
+      - name: Auto-Bump Version Counter
+        id: bump_ver
+        run: |
+          BUILD_CODE=${{ github.run_number }}
+          BUILD_DATE=$(date +'%Y-%m-%d')
+          
+          # Read base version prefix from version.json (e.g. 2.3)
+          BASE_PREFIX=$(node -e "const v = require('./version.json'); console.log(v.version.split('.').slice(0, 2).join('.'));")
+          NEW_VER="${BASE_PREFIX}.${BUILD_CODE}"
+          echo "NEW_VERSION=${NEW_VER}" >> $GITHUB_ENV
+          echo "BUILD_CODE=${BUILD_CODE}" >> $GITHUB_ENV
+          echo "Auto-incremented to version: $NEW_VER (Build $BUILD_CODE)"
+
+          # Update version.json and pwa/version.json
+          node -e "
+            const fs = require('fs');
+            const v = JSON.parse(fs.readFileSync('./version.json', 'utf8'));
+            v.version = '$NEW_VER';
+            v.buildCode = $BUILD_CODE;
+            v.buildDate = '$BUILD_DATE';
+            if (v.firmware) {
+              v.firmware.version = '$NEW_VER';
+              v.firmware.releaseDate = '$BUILD_DATE';
+            }
+            fs.writeFileSync('./version.json', JSON.stringify(v, null, 2) + '\n');
+            fs.writeFileSync('./pwa/version.json', JSON.stringify(v, null, 2) + '\n');
+
+            const fv = {
+              version: '$NEW_VER',
+              buildDate: '$BUILD_DATE',
+              target: 'ESP32-WROOM-32',
+              binFile: 'NovaX-Firmware.bin',
+              downloadUrl: 'https://raw.githubusercontent.com/onebotyt/robocar/main/firmware/NovaX-Firmware.bin',
+              changelog: v.changelog || 'Latest NovaX build'
+            };
+            fs.writeFileSync('./firmware/version.json', JSON.stringify(fv, null, 2) + '\n');
+          "
+
+          # Update android/app/build.gradle
+          sed -i "s/versionCode [0-9]*/versionCode $BUILD_CODE/g" android/app/build.gradle
+          sed -i "s/versionName \".*\"/versionName \"$NEW_VER\"/g" android/app/build.gradle
+
+          # Update CURRENT_APP_VERSION in app.js and pwa/app.js
+          sed -i "s/const CURRENT_APP_VERSION = '.*';/const CURRENT_APP_VERSION = '$NEW_VER';/g" app.js pwa/app.js
 
       - name: Set up Java JDK 21
         uses: actions/setup-java@v4
@@ -57,32 +103,60 @@ jobs:
           echo "Found APK: $APK_FILE"
           cp "$APK_FILE" build-output/NovaX-Controller.apk
 
-      - name: Upload Debug APK Artifact
+      - name: Setup Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 Board and Libraries
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@2.0.14
+          arduino-cli lib install "ESP32Servo" "Adafruit MPU6050" "Adafruit BusIO" "Adafruit Unified Sensor"
+
+      - name: Compile ESP32 Firmware Binary
+        run: |
+          mkdir -p firmware
+          arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app --output-dir firmware/ esp32/NovaX_V2.ino
+          if [ -f "firmware/NovaX_V2.ino.bin" ]; then
+            cp firmware/NovaX_V2.ino.bin firmware/NovaX-Firmware.bin
+          fi
+          if [ -f "firmware/NovaX-Firmware.bin" ]; then
+            cp firmware/NovaX-Firmware.bin build-output/NovaX-Firmware.bin
+            echo "ESP32 Firmware binary compiled successfully."
+          fi
+
+      - name: Upload Debug APK & Firmware Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: NovaX-Controller-APK
-          path: build-output/NovaX-Controller.apk
-          if-no-files-found: error
+          name: NovaX-Release-Artifacts
+          path: build-output/
+          if-no-files-found: warn
 
-      - name: Commit Built APK to Repository Folder
+      - name: Commit Built Artifacts to Repository Folder
         run: |
           mkdir -p apk
           cp build-output/NovaX-Controller.apk apk/NovaX-Controller.apk
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add apk/NovaX-Controller.apk
+          git add apk/NovaX-Controller.apk version.json pwa/version.json firmware/version.json app.js pwa/app.js android/app/build.gradle
+          if [ -f "firmware/NovaX-Firmware.bin" ]; then
+            git add firmware/NovaX-Firmware.bin
+          fi
           if git diff --staged --quiet; then
-            echo "APK has not changed."
+            echo "No changes to commit."
           else
-            git commit -m "chore(build): update built NovaX-Controller.apk in repository [skip ci]"
+            git commit -m "chore(release): auto-bump version to v${NEW_VERSION}, build APK & ESP32 binary [skip ci]"
             git push origin main
           fi
 
-      - name: Create Release & Attach APK (On Tags)
+      - name: Create Release & Attach Artifacts (On Tags)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: build-output/NovaX-Controller.apk
+          files: |
+            build-output/NovaX-Controller.apk
+            build-output/NovaX-Firmware.bin
           name: NovaX Controller ${{ github.ref_name }}
           body_path: pwa/version.json
         env:

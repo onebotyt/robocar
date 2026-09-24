@@ -44,7 +44,7 @@
       <div class="top-brand">
         <span class="brand-dot" id="liveDot"></span>
         <span class="brand-name">NOVA-X</span>
-        <span class="brand-ver" id="fwVerHeader">V2.2</span>
+        <span class="brand-ver" id="fwVerHeader">V2.3</span>
         <span class="comm-badge" id="commBadge" title="Protocol Link">OFF</span>
       </div>
 
@@ -277,7 +277,7 @@
           <!-- GitHub In-App Updater -->
           <div class="config-block highlight-block">
             <div class="block-title">GitHub App Updates</div>
-            <div class="stat-line"><span>Installed Version:</span> <b id="installedAppVer" class="text-green">v2.2.0</b></div>
+            <div class="stat-line"><span>Installed Version:</span> <b id="installedAppVer" class="text-green">v2.3.0</b></div>
             <div class="stat-line"><span>Remote Version:</span> <b id="remoteAppVer">—</b></div>
 
             <label class="block-label mt-6">Repository (username/repo)</label>
@@ -289,6 +289,7 @@
             </div>
 
             <div class="pill-row mt-6">
+              <button id="forceUpdateBtn" class="pill-btn">Force Refresh</button>
               <button id="downloadApkBtn" class="pill-btn">Latest APK</button>
               <button id="factoryResetAppBtn" class="pill-btn">Reset Bundle</button>
             </div>
@@ -298,11 +299,19 @@
 
           <!-- Firmware OTA Update -->
           <div class="config-block">
-            <div class="block-title">Firmware OTA Flash</div>
-            <div class="stat-line"><span>Firmware:</span> <b id="fwVersionVal">2.1.0-pwa-ota</b></div>
+            <div class="block-title">ESP32 Firmware OTA (Cloud & Local)</div>
+            <div class="stat-line"><span>Installed on ESP32:</span> <b id="fwVersionVal">v2.3.0</b></div>
+            <div class="stat-line"><span>Latest on GitHub:</span> <b id="ghFwVersionVal" class="text-green">—</b></div>
             <input type="password" id="otaTokenInput" value="NovaX-OTA-ChangeMe" placeholder="OTA Token" class="mt-6">
-            <input type="file" id="fwFileInput" accept=".bin,application/octet-stream" class="mt-6">
-            <button id="fwUpdateBtn" class="pill-btn red w-100 mt-8">Update ESP32</button>
+
+            <!-- 1-Tap Cloud OTA Flash from GitHub -->
+            <button id="cloudOtaBtn" class="pill-btn blue w-100 mt-8">☁️ Flash Firmware from GitHub</button>
+            <div id="cloudOtaProgress" class="ota-msg-text" style="display:none;"></div>
+
+            <!-- Manual File Fallback -->
+            <div class="sub-label mt-8">Or Manual .bin File:</div>
+            <input type="file" id="fwFileInput" accept=".bin,application/octet-stream" class="mt-4">
+            <button id="fwUpdateBtn" class="pill-btn outline w-100 mt-6">Upload Local File</button>
             <div id="fwMsg" class="ota-msg-text"></div>
           </div>
 
@@ -315,6 +324,20 @@
   <!-- Dynamic In-App Hot JS Loader with Automatic Bundled Fallback -->
   <script>
     (function() {
+      // 1. Hot HTML Injection: If updated UI was downloaded from GitHub, rehydrate #app
+      try {
+        var hotHtml = localStorage.getItem('novax_hot_html');
+        if (hotHtml && hotHtml.length > 200) {
+          var appEl = document.getElementById('app');
+          if (appEl) {
+            appEl.outerHTML = hotHtml;
+          }
+        }
+      } catch (e) {
+        console.warn('Hot HTML rehydration bypassed:', e);
+      }
+
+      // 2. Hot JS Loader
       var hotJs = null;
       try {
         hotJs = localStorage.getItem('novax_hot_js');
@@ -331,6 +354,7 @@
             try {
               localStorage.removeItem('novax_hot_js');
               localStorage.removeItem('novax_hot_css');
+              localStorage.removeItem('novax_hot_html');
               localStorage.removeItem('novax_hot_version');
             } catch (ex) {}
             window.removeEventListener('error', onHotErr);

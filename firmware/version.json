@@ -1,0 +1,8 @@
+{
+  "version": "2.3.0",
+  "buildDate": "2026-09-25",
+  "target": "ESP32-WROOM-32",
+  "binFile": "NovaX-Firmware.bin",
+  "downloadUrl": "https://raw.githubusercontent.com/onebotyt/robocar/main/firmware/NovaX-Firmware.bin",
+  "changelog": "ESP32 V2.3: Real-time WebSocket (:81), 400ms motor watchdog, MPU6050 gyro assistance, and manual servo head pan controls (< SCAN >)."
+}

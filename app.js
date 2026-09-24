@@ -956,8 +956,79 @@ if ($('fwUpdateBtn')) {
   };
 }
 
+// 1-Tap Cloud OTA Flashing from GitHub
+async function flashCloudOta() {
+  vibrate(30);
+  const msg = $('cloudOtaProgress') || $('fwMsg');
+  if (msg) {
+    msg.style.display = 'block';
+    msg.textContent = '1/4 Verifying connection to NovaX car...';
+  }
+
+  // Ensure robot is reachable
+  try {
+    await api('/status', { timeout: 3000 });
+  } catch (e) {
+    const proceed = confirm(`Car not responding at ${base}.\nEnsure your phone is connected to "NovaX-Car" Wi-Fi.\nProceed anyway?`);
+    if (!proceed) {
+      if (msg) msg.style.display = 'none';
+      return;
+    }
+  }
+
+  const { repo, branch } = getGitHubConfig();
+  const token = $('otaTokenInput')?.value.trim() || 'NovaX-OTA-ChangeMe';
+
+  if (!confirm(`Download latest ESP32 firmware binary directly from GitHub (${repo}) and flash to car?\n\nCar motors will be safely stopped.`)) {
+    if (msg) msg.style.display = 'none';
+    return;
+  }
+
+  try {
+    // Step 1: Safety stop
+    if (msg) msg.textContent = '2/4 Stopping car motors for safety...';
+    try { await stopCar(); } catch (e) {}
+
+    // Step 2: Fetch binary from GitHub raw
+    if (msg) msg.textContent = `3/4 Downloading firmware from GitHub (${repo})...`;
+    const binUrl = `https://raw.githubusercontent.com/${repo}/${branch}/firmware/NovaX-Firmware.bin?t=${Date.now()}`;
+    const binRes = await fetch(binUrl, { cache: 'no-store' });
+    if (!binRes.ok) {
+      throw new Error(`Failed to download firmware binary from GitHub (HTTP ${binRes.status}). Ensure NovaX-Firmware.bin is pushed to GitHub.`);
+    }
+    const binBlob = await binRes.blob();
+    if (binBlob.size < 50000) {
+      throw new Error(`Firmware file too small (${binBlob.size} bytes). Make sure NovaX-Firmware.bin was compiled.`);
+    }
+
+    // Step 3: Flash to ESP32
+    if (msg) msg.textContent = `4/4 Flashing ${Math.round(binBlob.size / 1024)} KB to ESP32... Do not power off!`;
+    const uploadRes = await api('/ota/update', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-NovaX-OTA': token
+      },
+      body: binBlob,
+      timeout: 120000
+    });
+
+    if (!uploadRes.ok) {
+      const errText = await uploadRes.text();
+      throw new Error(errText || `HTTP ${uploadRes.status}`);
+    }
+
+    if (msg) msg.textContent = '✅ Firmware flashed successfully! ESP32 restarting...';
+    alert('🎉 ESP32 Firmware flashed successfully from GitHub!\nNovaX is rebooting now.');
+  } catch (err) {
+    console.error('Cloud OTA Error:', err);
+    if (msg) msg.textContent = `❌ Cloud OTA Failed: ${err.message}`;
+    alert(`Cloud OTA Error: ${err.message}`);
+  }
+}
+
 // ================= GITHUB APP UPDATER (WITH INTEGRITY CHECK & ROLLBACK) =================
-const CURRENT_APP_VERSION = '2.2.0';
+const CURRENT_APP_VERSION = '2.3.0';
 
 function getGitHubConfig() {
   const repo = $('ghRepoInput')?.value.trim() || localStorage.getItem('novax_gh_repo') || 'onebotyt/robocar';
@@ -986,6 +1057,11 @@ async function checkGithubUpdates(interactive = true) {
     const remoteVer = (data.version || '').trim();
     if ($('remoteAppVer')) $('remoteAppVer').textContent = `v${remoteVer}`;
 
+    // Display Firmware version on GitHub
+    if (data.firmware && data.firmware.version && $('ghFwVersionVal')) {
+      $('ghFwVersionVal').textContent = `v${data.firmware.version}`;
+    }
+
     if (remoteVer && remoteVer !== activeVer) {
       setUpdateLog(`New version available: v${remoteVer} (Current: v${activeVer})`);
       if ($('appUpdateBanner')) $('appUpdateBanner').style.display = 'flex';
@@ -1004,34 +1080,58 @@ async function checkGithubUpdates(interactive = true) {
   }
 }
 
-async function hotUpdateApp() {
+async function hotUpdateApp(force = false) {
   vibrate(30);
   const { repo, branch } = getGitHubConfig();
   const baseUrl = `https://raw.githubusercontent.com/${repo}/${branch}/pwa`;
-  setUpdateLog('Starting verified app update from GitHub...', false);
+  const rootUrl = `https://raw.githubusercontent.com/${repo}/${branch}`;
+  setUpdateLog(force ? 'Forcing live app sync from GitHub...' : 'Starting verified app update from GitHub...', false);
 
   try {
     // 1. Fetch version.json
-    setUpdateLog('1/3 Fetching version metadata...');
+    setUpdateLog('1/4 Fetching version metadata...');
     const verRes = await fetch(`${baseUrl}/version.json?t=${Date.now()}`, { cache: 'no-store' });
     if (!verRes.ok) throw new Error(`Failed to fetch version.json: HTTP ${verRes.status}`);
     const verData = await verRes.json();
-    const newVer = (verData.version || '').trim();
-    if (!newVer) throw new Error('Invalid version in remote metadata');
+    const newVer = (verData.version || '').trim() || (force ? 'latest' : '');
+    if (!newVer && !force) throw new Error('Invalid version in remote metadata');
 
-    // 2. Download and validate CSS
-    setUpdateLog('2/3 Downloading style.css...');
+    // 2. Download and validate HTML (Index)
+    setUpdateLog('2/4 Downloading and validating UI layout (index.html)...');
+    let htmlRes = await fetch(`${rootUrl}/index.html?t=${Date.now()}`, { cache: 'no-store' });
+    if (!htmlRes.ok) {
+      htmlRes = await fetch(`${baseUrl}/index.html?t=${Date.now()}`, { cache: 'no-store' });
+    }
+    if (!htmlRes.ok) throw new Error(`Failed to fetch index.html: HTTP ${htmlRes.status}`);
+    const fullHtml = await htmlRes.text();
+    
+    // Extract #app container markup
+    let appMarkup = '';
+    const startIdx = fullHtml.indexOf('<div id="app"');
+    const scriptIdx = fullHtml.indexOf('<!-- Dynamic In-App Hot JS Loader');
+    if (startIdx !== -1 && scriptIdx !== -1) {
+      appMarkup = fullHtml.substring(startIdx, scriptIdx).trim();
+    }
+
+    if (!appMarkup || appMarkup.length < 500) {
+      throw new Error('Downloaded UI template is incomplete or missing #app container.');
+    }
+    if (!appMarkup.includes('cockpit-grid') || !appMarkup.includes('dpadUp')) {
+      throw new Error('Integrity check failed: missing required cockpit elements.');
+    }
+
+    // 3. Download and validate CSS
+    setUpdateLog('3/4 Downloading style.css...');
     const cssRes = await fetch(`${baseUrl}/style.css?t=${Date.now()}`, { cache: 'no-store' });
     if (!cssRes.ok) throw new Error(`Failed to fetch style.css: HTTP ${cssRes.status}`);
     const cssText = await cssRes.text();
     if (cssText.length < 500) throw new Error('Downloaded CSS payload too small or truncated');
 
-    // 3. Download and strictly validate JS
-    setUpdateLog('3/3 Downloading and verifying app.js...');
+    // 4. Download and strictly validate JS
+    setUpdateLog('4/4 Downloading and verifying app.js...');
     const jsRes = await fetch(`${baseUrl}/app.js?t=${Date.now()}`, { cache: 'no-store' });
     if (!jsRes.ok) throw new Error(`Failed to fetch app.js: HTTP ${jsRes.status}`);
     const jsText = await jsRes.text();
-
     if (jsText.length < 3000) throw new Error('Downloaded JS payload too small or truncated');
 
     // Integrity check: verify required NovaX controller symbols
@@ -1049,14 +1149,15 @@ async function hotUpdateApp() {
       throw new Error(`Syntax verification failed: ${syntaxErr.message}`);
     }
 
-    // Validation passed: save to local storage
+    // Validation passed: save all hot update layers to localStorage
     localStorage.setItem('novax_hot_version', newVer);
+    localStorage.setItem('novax_hot_html', appMarkup);
     localStorage.setItem('novax_hot_css', cssText);
     localStorage.setItem('novax_hot_js', jsText);
 
     setUpdateLog(`Validation passed! Reloading NovaX v${newVer}...`);
     vibrate(40);
-    setTimeout(() => window.location.reload(), 1200);
+    setTimeout(() => window.location.reload(), 800);
   } catch (err) {
     setUpdateLog(`Update aborted for safety: ${err.message}`);
     alert(`Update Error: ${err.message}\nKeeping current working version.`);
@@ -1068,6 +1169,7 @@ function factoryResetApp() {
   if (!confirm('Revert back to factory bundled APK version?\nThis will clear any downloaded hot updates.')) return;
   try {
     localStorage.removeItem('novax_hot_version');
+    localStorage.removeItem('novax_hot_html');
     localStorage.removeItem('novax_hot_css');
     localStorage.removeItem('novax_hot_js');
   } catch (e) {}
@@ -1076,8 +1178,10 @@ function factoryResetApp() {
 }
 
 if ($('checkGhUpdateBtn')) $('checkGhUpdateBtn').onclick = () => checkGithubUpdates(true);
-if ($('hotUpdateBtn')) $('hotUpdateBtn').onclick = hotUpdateApp;
+if ($('hotUpdateBtn')) $('hotUpdateBtn').onclick = () => hotUpdateApp(false);
+if ($('forceUpdateBtn')) $('forceUpdateBtn').onclick = () => hotUpdateApp(true);
 if ($('factoryResetAppBtn')) $('factoryResetAppBtn').onclick = factoryResetApp;
+if ($('cloudOtaBtn')) $('cloudOtaBtn').onclick = flashCloudOta;
 if ($('downloadApkBtn')) {
   $('downloadApkBtn').onclick = () => {
     const { repo } = getGitHubConfig();
@@ -1088,7 +1192,7 @@ if ($('downloadApkBtn')) {
 if ($('bannerUpdateBtn')) {
   $('bannerUpdateBtn').onclick = () => {
     if ($('appUpdateBanner')) $('appUpdateBanner').style.display = 'none';
-    hotUpdateApp();
+    hotUpdateApp(false);
   };
 }
 if ($('bannerDismissBtn')) {

@@ -259,33 +259,38 @@ WebSocket is the **primary real-time control link** operating on port **81** (`w
 
 ---
 
-## 7. ESP32 OTA Firmware Update
+## 7. ESP32 OTA Firmware Update (Cloud & Local)
 
 Update the ESP32 firmware wirelessly over Wi-Fi without USB cables:
 
+### Method A: 1-Tap Cloud OTA from GitHub (Recommended)
+Since your firmware code is hosted on GitHub, you can flash directly from GitHub:
+1. Ensure your phone is connected to **"NovaX-Car"** Wi-Fi.
+2. Open NovaX Cockpit **⚙️ Settings**.
+3. Under **ESP32 Firmware OTA**, see the current installed version vs latest GitHub version.
+4. Tap **☁️ Flash Firmware from GitHub**.
+5. The app automatically stops robot motors, downloads `firmware/NovaX-Firmware.bin` from your repository, streams it directly into the ESP32 OTA flash partition over Wi-Fi, and reboots the car!
+
+### Method B: Manual Local .bin File
 1. In Arduino IDE, compile your sketch and click **Sketch -> Export Compiled Binary**.
 2. Open the NovaX Cockpit Settings modal (**⚙️ Settings**).
-3. Scroll to **Firmware OTA Flash**.
+3. Scroll to **ESP32 Firmware OTA (Cloud & Local)**.
 4. Enter the OTA security token (Default: `NovaX-OTA-ChangeMe`).
-5. Choose the `.bin` file and click **Update ESP32**.
-6. The robot stops all motors, validates the binary, writes to the OTA flash partition, and reboots cleanly back into AP mode.
+5. Choose the local `.bin` file and tap **Upload Local File**.
+6. The robot stops all motors, validates the binary, writes to the OTA partition, and reboots cleanly back into AP mode.
 
 *For complete security details, consult [OTA.md](docs/OTA.md).*
 
 ---
 
-## 8. GitHub App Update System (Integrity & Fallback)
+## 8. GitHub App Update & Version Control System
 
-NovaX V2 includes an independent **In-App Hot-Update System** for the phone UI with strict integrity verification and fallback protection:
+NovaX V2 includes an automated **Version Counter** and **In-App Hot-Update System** for both the phone UI and ESP32 firmware:
 
-- **Independent Systems**: Phone application updates and ESP32 firmware updates operate independently.
-- **Verification Engine**: Before any hot update is applied:
-  1. The app verifies semantic versioning in `version.json`.
-  2. Ensures downloaded CSS and JS files exceed minimum byte lengths.
-  3. Performs an in-memory syntax compile check using `new Function(jsText)` without executing.
-  4. Confirms critical controller symbols (`sendMove`, `stopCar`, `initWebSocket`) exist.
-- **Fail-Safe Fallback**: If an update fails evaluation, the app automatically purges the corrupted cache and reloads the factory bundled code from the APK.
-- **Manual Rollback**: Tap **"Reset Bundle"** in Settings at any time to instantly revert to the factory bundled release.
+- **Automated Version Counter**: Every push to GitHub runs the CI workflow, auto-incrementing the version number (e.g. `v2.3.1`, `v2.3.2`...) across `version.json`, `android/app/build.gradle`, and `firmware/version.json`.
+- **Instant Live UI Sync (Hot Update)**: The mobile app checks GitHub on startup. If a newer commit exists, it shows an update banner. Tapping **Update Now** downloads the updated UI structure (`index.html`), styles (`style.css`), and logic (`app.js`) without needing to reinstall the APK!
+- **Force Refresh**: In Settings, tap **Force Refresh** at any time to immediately pull the latest UI layout from GitHub with zero caching delay.
+- **Fail-Safe Fallback**: If an update encounters an evaluation error, it automatically purges local hot cache and reloads the factory APK bundle. Tap **"Reset Bundle"** in Settings at any time to manually revert.
 
 ---
 
