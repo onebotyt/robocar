@@ -1,10 +1,18 @@
 /**
- * NovaX Cyber Cockpit - 3-Card Mobile Car Controller
- * Full PWA & Native Capacitor Compatible
+ * NovaX Cyber Cockpit - V2 Production Controller
+ * Full PWA & Native Capacitor Android Compatible
+ * Package: com.novax.controller
+ * Primary Communication: RFC 6455 WebSocket (:81) with Dual HTTP REST Fallback
  */
 
 // ================= STATE & CONFIGURATION =================
 let base = localStorage.getItem('novaxBase') || 'http://192.168.4.1';
+let ws = null;
+let wsConnected = false;
+let wsReconnectTimer = null;
+let wsPingTimer = null;
+let lastWsMessageTime = 0;
+
 let isDrawMode = false;
 let camOn = false;
 let isConnected = false;
@@ -22,7 +30,7 @@ const vibrate = (ms = 15) => {
   } catch (e) {}
 };
 
-// API Caller
+// ================= PROTOCOL & HTTP REST CLIENT =================
 const api = async (path, options = {}) => {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), options.timeout || 3500);
@@ -46,18 +54,38 @@ const jsonApi = async (path, options = {}) => {
   return res.json();
 };
 
-// ================= TELEMETRY & STATUS =================
-function setConnectionState(online) {
+// ================= CONNECTION & TELEMETRY INDICATORS =================
+function setConnectionState(online, proto = 'HTTP') {
   isConnected = online;
   const dot = $('liveDot');
   if (dot) {
     if (online) dot.classList.add('online');
     else dot.classList.remove('online');
   }
+
+  // Header protocol badge (WS / HTTP / OFF)
+  const badge = $('commBadge');
+  if (badge) {
+    if (online && proto === 'WS') {
+      badge.textContent = 'WS';
+      badge.className = 'comm-badge ws-live';
+      badge.title = 'Real-time WebSocket Connected (:81)';
+    } else if (online && proto === 'HTTP') {
+      badge.textContent = 'HTTP';
+      badge.className = 'comm-badge http-fallback';
+      badge.title = 'HTTP Fallback Active (WebSocket Reconnecting...)';
+    } else {
+      badge.textContent = 'OFF';
+      badge.className = 'comm-badge';
+      badge.title = 'No Connection to NovaX';
+    }
+  }
+
+  // Settings modal connection status line
   const statusEl = $('connStatusStat');
   if (statusEl) {
     if (online) {
-      statusEl.textContent = 'Connected';
+      statusEl.textContent = `Connected (${proto})`;
       statusEl.className = 'status-green';
     } else {
       statusEl.textContent = 'No connection';
@@ -66,46 +94,259 @@ function setConnectionState(online) {
   }
 }
 
+// ================= WEBSOCKET CLIENT LAYER (:81) =================
+function getWsUrl() {
+  try {
+    const u = new URL(base);
+    const host = u.hostname || '192.168.4.1';
+    return `ws://${host}:81/`;
+  } catch (e) {
+    const cleaned = base.replace(/^https?:\/\//i, '').replace(/\/.*$/, '').split(':')[0];
+    return `ws://${cleaned || '192.168.4.1'}:81/`;
+  }
+}
+
+function initWebSocket() {
+  // Clear any existing reconnect timer
+  if (wsReconnectTimer) {
+    clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = null;
+  }
+
+  // Gracefully close any existing socket
+  if (ws) {
+    try {
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.onclose = null;
+      ws.close();
+    } catch (e) {}
+    ws = null;
+  }
+
+  const wsUrl = getWsUrl();
+  console.log(`[NovaX-WS] Connecting to ${wsUrl}...`);
+
+  try {
+    ws = new WebSocket(wsUrl);
+  } catch (err) {
+    console.warn('[NovaX-WS] Failed to construct WebSocket:', err);
+    scheduleWsReconnect();
+    return;
+  }
+
+  ws.onopen = () => {
+    console.log('[NovaX-WS] Connection established on port 81!');
+    wsConnected = true;
+    lastWsMessageTime = Date.now();
+    setConnectionState(true, 'WS');
+
+    // Start keepalive heartbeat ping every 3000ms
+    clearInterval(wsPingTimer);
+    wsPingTimer = setInterval(() => {
+      if (wsConnected) {
+        sendWs({ type: 'ping' });
+      }
+    }, 3000);
+  };
+
+  ws.onmessage = (event) => {
+    lastWsMessageTime = Date.now();
+    setConnectionState(true, 'WS');
+
+    try {
+      const data = JSON.parse(event.data);
+      handleWsPayload(data);
+    } catch (e) {
+      console.warn('[NovaX-WS] Non-JSON payload received:', event.data);
+    }
+  };
+
+  ws.onerror = (err) => {
+    console.warn('[NovaX-WS] Error encountered:', err);
+  };
+
+  ws.onclose = () => {
+    console.log('[NovaX-WS] Disconnected.');
+    wsConnected = false;
+    clearInterval(wsPingTimer);
+    // If HTTP was connected previously, downgrade indicator to HTTP fallback
+    if (isConnected) {
+      setConnectionState(true, 'HTTP');
+    } else {
+      setConnectionState(false);
+    }
+    scheduleWsReconnect();
+  };
+}
+
+function scheduleWsReconnect() {
+  if (wsReconnectTimer) return;
+  wsReconnectTimer = setTimeout(() => {
+    wsReconnectTimer = null;
+    initWebSocket();
+  }, 1800);
+}
+
+function sendWs(payload) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      ws.send(typeof payload === 'string' ? payload : JSON.stringify(payload));
+      return true;
+    } catch (e) {
+      console.warn('[NovaX-WS] Send failed:', e);
+    }
+  }
+  return false;
+}
+
+// Inbound WebSocket Message Router
+function handleWsPayload(data) {
+  if (!data || !data.type) return;
+
+  switch (data.type) {
+    case 'telemetry':
+      // Ultrasonic Front Distance
+      if (data.distance !== undefined && $('radarDistVal')) {
+        $('radarDistVal').textContent = data.distance;
+      }
+
+      // Battery voltage / status
+      const bat = $('batteryStat');
+      if (bat && data.battery !== undefined) {
+        bat.textContent = `${Number(data.battery).toFixed(2)}V`;
+      }
+
+      // Robot mode (manual / auto)
+      if (data.mode) {
+        currentMode = data.mode === 'auto' ? 'auto' : 'manual';
+        const modeBtn = $('modeToggleBtn');
+        if (modeBtn) {
+          modeBtn.textContent = currentMode.toUpperCase();
+          modeBtn.className = `hero-btn ${currentMode === 'manual' ? 'hero-blue' : 'hero-red'}`;
+        }
+      }
+
+      // Wi-Fi info in settings
+      if (data.wifiMode && $('wifiModeVal')) $('wifiModeVal').textContent = data.wifiMode;
+      if (data.ip && $('wifiIpVal')) $('wifiIpVal').textContent = data.ip;
+      break;
+
+    case 'radar':
+      // Real-time angle & distance stream during sweep
+      if (data.angle !== undefined && data.distance !== undefined) {
+        const angle = Number(data.angle);
+        const dist = Number(data.distance) || 400;
+        const calcBottom = (d) => `${Math.min(85, Math.max(15, (d / 400) * 80))}%`;
+
+        if (angle <= -30 && $('blipLeft')) {
+          $('blipLeft').style.bottom = calcBottom(dist);
+        } else if (angle >= 30 && $('blipRight')) {
+          $('blipRight').style.bottom = calcBottom(dist);
+        } else if ($('blipFront')) {
+          $('blipFront').style.bottom = calcBottom(dist);
+          if ($('radarDistVal')) $('radarDistVal').textContent = dist;
+        }
+      }
+      break;
+
+    case 'radar_summary':
+      // Full sweep completed
+      if ($('radarStatusTag')) $('radarStatusTag').textContent = 'DONE';
+      const L = Number(data.left) || 400;
+      const F = Number(data.front) || 400;
+      const R = Number(data.right) || 400;
+
+      if ($('radarDistVal')) $('radarDistVal').textContent = F;
+      const calcBottom = (d) => `${Math.min(85, Math.max(15, (d / 400) * 80))}%`;
+      if ($('blipLeft')) $('blipLeft').style.bottom = calcBottom(L);
+      if ($('blipFront')) $('blipFront').style.bottom = calcBottom(F);
+      if ($('blipRight')) $('blipRight').style.bottom = calcBottom(R);
+      break;
+
+    case 'pong':
+      // Heartbeat acknowledgment
+      break;
+
+    case 'mode':
+      if (data.value) {
+        currentMode = data.value;
+        const modeBtn = $('modeToggleBtn');
+        if (modeBtn) {
+          modeBtn.textContent = currentMode.toUpperCase();
+          modeBtn.className = `hero-btn ${currentMode === 'manual' ? 'hero-blue' : 'hero-red'}`;
+        }
+      }
+      break;
+  }
+}
+
+// ================= PERIODIC STATUS CHECK (HTTP REST FALLBACK) =================
 async function updateStatus() {
+  // If WebSocket is actively receiving messages, reduce HTTP poll frequency
+  if (wsConnected && (Date.now() - lastWsMessageTime < 5000)) {
+    return;
+  }
+
   try {
     const data = await jsonApi('/status');
-    setConnectionState(true);
+    setConnectionState(true, wsConnected ? 'WS' : 'HTTP');
 
     // Distance in Radar
     if (data.distance !== undefined && data.distance !== null && $('radarDistVal')) {
       $('radarDistVal').textContent = data.distance;
     }
 
-    // Battery / Ping estimate (if present in DOM)
+    // Battery display
     const bat = $('batteryStat');
-    if (bat) bat.textContent = '98%';
+    if (bat) {
+      if (data.battery !== undefined) bat.textContent = `${Number(data.battery).toFixed(2)}V`;
+      else bat.textContent = '98%';
+    }
 
-    // Mode
+    // Robot mode
     currentMode = data.mode ? 'manual' : 'auto';
-    $('modeToggleBtn').textContent = currentMode.toUpperCase();
-    $('modeToggleBtn').className = `hero-btn ${currentMode === 'manual' ? 'hero-blue' : 'hero-red'}`;
+    const modeBtn = $('modeToggleBtn');
+    if (modeBtn) {
+      modeBtn.textContent = currentMode.toUpperCase();
+      modeBtn.className = `hero-btn ${currentMode === 'manual' ? 'hero-blue' : 'hero-red'}`;
+    }
 
     // Wi-Fi Info in Settings
-    if (data.wifiMode) $('wifiModeVal').textContent = data.wifiMode;
-    if (data.ip) $('wifiIpVal').textContent = data.ip;
+    if (data.wifiMode && $('wifiModeVal')) $('wifiModeVal').textContent = data.wifiMode;
+    if (data.ip && $('wifiIpVal')) $('wifiIpVal').textContent = data.ip;
     if (data.version) {
-      $('fwVersionVal').textContent = data.version;
-      $('fwVerHeader').textContent = data.version;
+      if ($('fwVersionVal')) $('fwVersionVal').textContent = data.version;
+      if ($('fwVerHeader')) $('fwVerHeader').textContent = data.version;
     }
   } catch (err) {
-    setConnectionState(false);
+    if (!wsConnected) {
+      setConnectionState(false);
+    }
   }
 }
 
-// ================= DRIVE CONTROLS (D-PAD) =================
+// ================= DRIVE CONTROLS (D-PAD & MOTOR WATCHDOG) =================
 let moveInterval = null;
 let currentMoveCmd = 'S';
 
-async function sendMove(cmd) {
+async function sendMove(cmd, speed = 180) {
   currentMoveCmd = cmd;
-  try {
-    await api(`/move?d=${cmd}`);
-  } catch (e) {}
+
+  // 1. Primary: Send via WebSocket text frame
+  const sent = sendWs({
+    type: 'move',
+    dir: cmd,
+    speed: speed
+  });
+
+  // 2. Fallback: If WebSocket is disconnected, send HTTP REST command
+  if (!sent) {
+    try {
+      await api(`/move?d=${cmd}&speed=${speed}`);
+    } catch (e) {}
+  }
 }
 
 $$('[data-move]').forEach((btn) => {
@@ -116,8 +357,10 @@ $$('[data-move]').forEach((btn) => {
     vibrate(18);
     btn.classList.add('active');
     sendMove(dir);
+
+    // Continuous refresh every 100ms keeps ESP32 400ms watchdog alive
     clearInterval(moveInterval);
-    moveInterval = setInterval(() => sendMove(dir), 120);
+    moveInterval = setInterval(() => sendMove(dir), 100);
   };
 
   const stopDrive = (e) => {
@@ -133,48 +376,88 @@ $$('[data-move]').forEach((btn) => {
   );
 });
 
-// Stop Buttons
+// Emergency Stop Buttons (Dual-Channel: WS + HTTP)
 const stopCar = () => {
   vibrate(35);
   clearInterval(moveInterval);
-  sendMove('S');
+  currentMoveCmd = 'S';
+
+  // Primary: WS stop frame
+  sendWs({ type: 'stop' });
+
+  // Dual Fallback: Immediate HTTP stop endpoint
   api('/stop').catch(() => {});
 };
 
-$('stop').onclick = stopCar;
-$('centerStopBtn').onclick = stopCar;
+if ($('stop')) $('stop').onclick = stopCar;
+if ($('centerStopBtn')) $('centerStopBtn').onclick = stopCar;
 
-// Mode Toggle
-$('modeToggleBtn').onclick = async () => {
-  vibrate(20);
-  const target = currentMode === 'manual' ? 'auto' : 'manual';
-  await api(`/mode?set=${target}`).catch(() => {});
-  updateStatus();
-};
+// Autonomous / Manual Mode Toggle
+if ($('modeToggleBtn')) {
+  $('modeToggleBtn').onclick = async () => {
+    vibrate(20);
+    const target = currentMode === 'manual' ? 'auto' : 'manual';
 
-// Tactical Rotations
-$('rotLBtn').onclick = () => { vibrate(20); api('/rotate?dir=left').catch(() => {}); };
-$('rotRBtn').onclick = () => { vibrate(20); api('/rotate?dir=right').catch(() => {}); };
-$('rot360Btn').onclick = () => { vibrate(25); api('/rotate?dir=360').catch(() => {}); };
+    const sent = sendWs({ type: 'mode', value: target });
+    if (!sent) {
+      await api(`/mode?set=${target}`).catch(() => {});
+    }
+    currentMode = target;
+    $('modeToggleBtn').textContent = currentMode.toUpperCase();
+    $('modeToggleBtn').className = `hero-btn ${currentMode === 'manual' ? 'hero-blue' : 'hero-red'}`;
+  };
+}
 
-// LED Effects
+// Tactical Gyroscope Rotations (MPU6050 Assisted)
+if ($('rotLBtn')) {
+  $('rotLBtn').onclick = () => {
+    vibrate(20);
+    if (!sendWs({ type: 'rotate', dir: 'left' })) {
+      api('/rotate?dir=left').catch(() => {});
+    }
+  };
+}
+
+if ($('rotRBtn')) {
+  $('rotRBtn').onclick = () => {
+    vibrate(20);
+    if (!sendWs({ type: 'rotate', dir: 'right' })) {
+      api('/rotate?dir=right').catch(() => {});
+    }
+  };
+}
+
+if ($('rot360Btn')) {
+  $('rot360Btn').onclick = () => {
+    vibrate(25);
+    if (!sendWs({ type: 'rotate', dir: '360' })) {
+      api('/rotate?dir=360').catch(() => {});
+    }
+  };
+}
+
+// 74HC595 Shift Register LED Effects
 $$('[data-led]').forEach((btn) => {
   btn.onclick = async () => {
     vibrate(15);
     $$('[data-led]').forEach((b) => b.classList.remove('active'));
     btn.classList.add('active');
     const eff = btn.dataset.led;
-    await api(`/led?effect=${eff}`).catch(() => {});
+
+    if (!sendWs({ type: 'led', pattern: eff })) {
+      await api(`/led?effect=${eff}`).catch(() => {});
+    }
   };
 });
 
 // ================= DRAW MODE TOGGLE & CANVAS =================
 const canvas = $('drawCanvas');
-const ctx = canvas.getContext('2d');
+const ctx = canvas ? canvas.getContext('2d') : null;
 let drawing = false;
 let pathPoints = [];
 
 function resizeCanvas() {
+  if (!canvas || !ctx) return;
   const rect = canvas.parentElement.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   canvas.width = rect.width * dpr;
@@ -192,6 +475,7 @@ function getPos(e) {
 }
 
 function redrawPath() {
+  if (!canvas || !ctx) return;
   const rect = canvas.getBoundingClientRect();
   ctx.clearRect(0, 0, rect.width, rect.height);
   if (pathPoints.length < 2) return;
@@ -212,121 +496,171 @@ function redrawPath() {
   ctx.shadowBlur = 0;
 }
 
-canvas.onpointerdown = (e) => {
-  drawing = true;
-  canvas.setPointerCapture(e.pointerId);
-  pathPoints = [getPos(e)];
-  redrawPath();
-};
+if (canvas) {
+  canvas.onpointerdown = (e) => {
+    drawing = true;
+    canvas.setPointerCapture(e.pointerId);
+    pathPoints = [getPos(e)];
+    redrawPath();
+  };
 
-canvas.onpointermove = (e) => {
-  if (!drawing) return;
-  pathPoints.push(getPos(e));
-  redrawPath();
-};
+  canvas.onpointermove = (e) => {
+    if (!drawing) return;
+    pathPoints.push(getPos(e));
+    redrawPath();
+  };
 
-['pointerup', 'pointercancel'].forEach((ev) => {
-  canvas.addEventListener(ev, () => {
-    drawing = false;
+  ['pointerup', 'pointercancel'].forEach((ev) => {
+    canvas.addEventListener(ev, () => {
+      drawing = false;
+    });
   });
-});
+}
 
 // Toggle between D-Pad and Canvas
-$('drawModeBtn').onclick = () => {
-  vibrate(20);
-  isDrawMode = !isDrawMode;
+if ($('drawModeBtn')) {
+  $('drawModeBtn').onclick = () => {
+    vibrate(20);
+    isDrawMode = !isDrawMode;
 
-  const dpadView = $('dpadView');
-  const canvasView = $('canvasView');
-  const modeTag = $('controlModeTag');
-  const btn = $('drawModeBtn');
+    const dpadView = $('dpadView');
+    const canvasView = $('canvasView');
+    const modeTag = $('controlModeTag');
+    const btn = $('drawModeBtn');
 
-  if (isDrawMode) {
-    dpadView.style.display = 'none';
-    canvasView.style.display = 'block';
-    modeTag.textContent = 'CANVAS';
-    btn.textContent = 'Drive Mode';
-    btn.classList.add('active');
-    setTimeout(resizeCanvas, 50);
-  } else {
-    canvasView.style.display = 'none';
-    dpadView.style.display = 'flex';
-    modeTag.textContent = 'D-PAD';
-    btn.textContent = 'Draw Mode';
-    btn.classList.remove('active');
-  }
-};
-
-$('clearBtn').onclick = () => {
-  vibrate(15);
-  pathPoints = [];
-  const rect = canvas.getBoundingClientRect();
-  ctx.clearRect(0, 0, rect.width, rect.height);
-};
-
-$('sendPathBtn').onclick = async () => {
-  vibrate(30);
-  if (pathPoints.length === 0) {
-    alert('Draw a path on the canvas first!');
-    return;
-  }
-  const body = pathPoints
-    .map((p) => `${p.x.toFixed(3)},${p.y.toFixed(3)}`)
-    .join(';');
-
-  try {
-    await api('/path', {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
-      body
-    });
-    alert('Path sent to NovaX!');
-  } catch (err) {
-    alert(`Send path failed: ${err.message}`);
-  }
-};
-
-// ================= RADAR SWEEPER =================
-$('scanBtn').onclick = async () => {
-  vibrate(30);
-  $('radarStatusTag').textContent = 'SCANNING';
-  try {
-    await api('/scan');
-    setTimeout(async () => {
-      try {
-        const res = await jsonApi('/scanResult');
-        $('radarStatusTag').textContent = 'DONE';
-
-        const L = Number(res.left) || 400;
-        const F = Number(res.front) || 400;
-        const R = Number(res.right) || 400;
-
-        $('radarDistVal').textContent = F;
-
-        // Position blips
-        const calcBottom = (dist) => `${Math.min(85, Math.max(15, (dist / 400) * 80))}%`;
-        $('blipLeft').style.bottom = calcBottom(L);
-        $('blipFront').style.bottom = calcBottom(F);
-        $('blipRight').style.bottom = calcBottom(R);
-      } catch (e) {
-        $('radarStatusTag').textContent = 'TIMEOUT';
+    if (isDrawMode) {
+      if (dpadView) dpadView.style.display = 'none';
+      if (canvasView) canvasView.style.display = 'block';
+      if (modeTag) modeTag.textContent = 'CANVAS';
+      if (btn) {
+        btn.textContent = 'Drive Mode';
+        btn.classList.add('active');
       }
-    }, 1100);
-  } catch (e) {
-    $('radarStatusTag').textContent = 'FAILED';
-  }
-};
+      setTimeout(resizeCanvas, 50);
+    } else {
+      if (canvasView) canvasView.style.display = 'none';
+      if (dpadView) dpadView.style.display = 'flex';
+      if (modeTag) modeTag.textContent = 'D-PAD';
+      if (btn) {
+        btn.textContent = 'Draw Mode';
+        btn.classList.remove('active');
+      }
+    }
+  };
+}
 
-$('sonarToggleBtn').onclick = async () => {
-  vibrate(20);
-  sonarEnabled = !sonarEnabled;
-  const btn = $('sonarToggleBtn');
-  btn.textContent = sonarEnabled ? 'Sonar ON' : 'Sonar OFF';
-  btn.classList.toggle('active', sonarEnabled);
-  await api(`/sonarToggle?mode=${sonarEnabled ? 'on' : 'off'}`).catch(() => {});
-};
+if ($('clearBtn')) {
+  $('clearBtn').onclick = () => {
+    vibrate(15);
+    pathPoints = [];
+    if (canvas && ctx) {
+      const rect = canvas.getBoundingClientRect();
+      ctx.clearRect(0, 0, rect.width, rect.height);
+    }
+  };
+}
 
-// ================= LIVE CAMERA STREAM MODAL =================
+if ($('sendPathBtn')) {
+  $('sendPathBtn').onclick = async () => {
+    vibrate(30);
+    if (pathPoints.length === 0) {
+      alert('Draw a path on the canvas first!');
+      return;
+    }
+
+    // Format coordinates
+    const formattedPoints = pathPoints.map((p) => ({
+      x: Number(p.x.toFixed(3)),
+      y: Number(p.y.toFixed(3))
+    }));
+
+    // 1. Try WebSocket
+    const sent = sendWs({
+      type: 'path',
+      points: formattedPoints
+    });
+
+    if (sent) {
+      alert('Path sent to NovaX via WebSocket!');
+      return;
+    }
+
+    // 2. HTTP Fallback
+    const body = pathPoints
+      .map((p) => `${p.x.toFixed(3)},${p.y.toFixed(3)}`)
+      .join(';');
+
+    try {
+      await api('/path', {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body
+      });
+      alert('Path sent to NovaX via HTTP!');
+    } catch (err) {
+      alert(`Send path failed: ${err.message}`);
+    }
+  };
+}
+
+// ================= RADAR SWEEPER & SONAR =================
+if ($('scanBtn')) {
+  $('scanBtn').onclick = async () => {
+    vibrate(30);
+    if ($('radarStatusTag')) $('radarStatusTag').textContent = 'SCANNING';
+
+    // 1. Try WebSocket scan command
+    const sent = sendWs({ type: 'scan' });
+
+    if (!sent) {
+      try {
+        await api('/scan');
+      } catch (e) {
+        if ($('radarStatusTag')) $('radarStatusTag').textContent = 'FAILED';
+        return;
+      }
+    }
+
+    // Fallback timer to query /scanResult if WebSocket summary doesn't arrive
+    setTimeout(async () => {
+      if ($('radarStatusTag') && $('radarStatusTag').textContent === 'SCANNING') {
+        try {
+          const res = await jsonApi('/scanResult');
+          $('radarStatusTag').textContent = 'DONE';
+
+          const L = Number(res.left) || 400;
+          const F = Number(res.front) || 400;
+          const R = Number(res.right) || 400;
+
+          if ($('radarDistVal')) $('radarDistVal').textContent = F;
+          const calcBottom = (dist) => `${Math.min(85, Math.max(15, (dist / 400) * 80))}%`;
+          if ($('blipLeft')) $('blipLeft').style.bottom = calcBottom(L);
+          if ($('blipFront')) $('blipFront').style.bottom = calcBottom(F);
+          if ($('blipRight')) $('blipRight').style.bottom = calcBottom(R);
+        } catch (e) {
+          $('radarStatusTag').textContent = 'TIMEOUT';
+        }
+      }
+    }, 1200);
+  };
+}
+
+if ($('sonarToggleBtn')) {
+  $('sonarToggleBtn').onclick = async () => {
+    vibrate(20);
+    sonarEnabled = !sonarEnabled;
+    const btn = $('sonarToggleBtn');
+    btn.textContent = sonarEnabled ? 'Sonar ON' : 'Sonar OFF';
+    btn.classList.toggle('active', sonarEnabled);
+
+    const sent = sendWs({ type: 'sonar', state: sonarEnabled ? 'on' : 'off' });
+    if (!sent) {
+      await api(`/sonarToggle?mode=${sonarEnabled ? 'on' : 'off'}`).catch(() => {});
+    }
+  };
+}
+
+// ================= LIVE OV7670 CAMERA MODAL =================
 let camTimer = null;
 let camFrameCount = 0;
 let lastFpsTime = performance.now();
@@ -346,6 +680,7 @@ if ($('closeCamModal') && $('cameraModal')) {
 function fetchCamFrame() {
   if (!camOn) return;
   const img = $('cam');
+  if (!img) return;
   const tempImg = new Image();
   const frameUrl = `${base}/cam.jpg?t=${Date.now()}`;
 
@@ -354,7 +689,7 @@ function fetchCamFrame() {
     camFrameCount++;
     const now = performance.now();
     if (now - lastFpsTime >= 1000) {
-      $('camFpsVal').textContent = camFrameCount;
+      if ($('camFpsVal')) $('camFpsVal').textContent = camFrameCount;
       camFrameCount = 0;
       lastFpsTime = now;
     }
@@ -368,52 +703,64 @@ function fetchCamFrame() {
   tempImg.src = frameUrl;
 }
 
-$('camToggleBtn').onclick = () => {
-  camOn = !camOn;
-  vibrate(20);
-  const btn = $('camToggleBtn');
-  const standby = $('camStandby');
-  const badge = $('camStateBadge');
+if ($('camToggleBtn')) {
+  $('camToggleBtn').onclick = () => {
+    camOn = !camOn;
+    vibrate(20);
+    const btn = $('camToggleBtn');
+    const standby = $('camStandby');
+    const badge = $('camStateBadge');
 
-  if (camOn) {
-    btn.textContent = 'Camera OFF';
-    badge.textContent = 'LIVE';
-    badge.style.color = '#10b981';
-    standby.classList.remove('active');
-    fetchCamFrame();
-  } else {
-    btn.textContent = 'Camera ON';
-    badge.textContent = 'OFF';
-    badge.style.color = 'var(--text-dim)';
-    standby.classList.add('active');
-    clearTimeout(camTimer);
-    $('camFpsVal').textContent = '0';
-  }
-};
+    if (camOn) {
+      btn.textContent = 'Camera OFF';
+      if (badge) {
+        badge.textContent = 'LIVE';
+        badge.style.color = '#10b981';
+      }
+      if (standby) standby.classList.remove('active');
+      fetchCamFrame();
+    } else {
+      btn.textContent = 'Camera ON';
+      if (badge) {
+        badge.textContent = 'OFF';
+        badge.style.color = 'var(--text-dim)';
+      }
+      if (standby) standby.classList.add('active');
+      clearTimeout(camTimer);
+      if ($('camFpsVal')) $('camFpsVal').textContent = '0';
+    }
+  };
+}
 
-$('camSnapBtn').onclick = () => {
-  vibrate(25);
-  const img = $('cam');
-  if (!img.src || !camOn) {
-    alert('Turn Camera ON first to take a snapshot.');
-    return;
-  }
-  const a = document.createElement('a');
-  a.href = img.src;
-  a.download = `novax_${Date.now()}.jpg`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-};
+if ($('camSnapBtn')) {
+  $('camSnapBtn').onclick = () => {
+    vibrate(25);
+    const img = $('cam');
+    if (!img || !img.src || !camOn) {
+      alert('Turn Camera ON first to take a snapshot.');
+      return;
+    }
+    const a = document.createElement('a');
+    a.href = img.src;
+    a.download = `novax_${Date.now()}.jpg`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+}
 
 // ================= SETTINGS & OTA MODAL =================
-$('openSettingsModalBtn').onclick = () => {
-  $('settingsModal').style.display = 'flex';
-};
+if ($('openSettingsModalBtn')) {
+  $('openSettingsModalBtn').onclick = () => {
+    if ($('settingsModal')) $('settingsModal').style.display = 'flex';
+  };
+}
 
-$('closeSettingsModal').onclick = () => {
-  $('settingsModal').style.display = 'none';
-};
+if ($('closeSettingsModal')) {
+  $('closeSettingsModal').onclick = () => {
+    if ($('settingsModal')) $('settingsModal').style.display = 'none';
+  };
+}
 
 function applyHost(newHost) {
   if (!newHost) return;
@@ -423,15 +770,20 @@ function applyHost(newHost) {
   }
   base = newHost;
   localStorage.setItem('novaxBase', base);
-  $('hostUrlInput').value = base;
+  if ($('hostUrlInput')) $('hostUrlInput').value = base;
+
+  // Re-establish WebSocket connection on host change
+  initWebSocket();
   updateStatus();
 }
 
-$('saveHostBtn').onclick = () => {
-  vibrate(15);
-  applyHost($('hostUrlInput').value);
-  alert(`Connected to ${base}`);
-};
+if ($('saveHostBtn')) {
+  $('saveHostBtn').onclick = () => {
+    vibrate(15);
+    applyHost($('hostUrlInput').value);
+    alert(`Connected to ${base}`);
+  };
+}
 
 $$('.quick-host-pill').forEach((pill) => {
   pill.onclick = () => {
@@ -440,52 +792,58 @@ $$('.quick-host-pill').forEach((pill) => {
   };
 });
 
-// Fullscreen
-$('fullscreenBtn').onclick = () => {
-  vibrate(15);
-  if (!document.fullscreenElement) {
-    document.documentElement.requestFullscreen().catch(() => {});
-  } else {
-    document.exitFullscreen().catch(() => {});
-  }
-};
-
-// Wi-Fi Management
-$('scanWifiBtn').onclick = async () => {
-  vibrate(25);
-  const el = $('wifiNetworksList');
-  el.innerHTML = '<div style="color:var(--color-teal)">Scanning Wi-Fi...</div>';
-  try {
-    const data = await jsonApi('/wifi/scan');
-    el.innerHTML = '';
-    if (!data.networks || data.networks.length === 0) {
-      el.innerHTML = '<div>No networks found.</div>';
-      return;
+// Fullscreen Toggle
+if ($('fullscreenBtn')) {
+  $('fullscreenBtn').onclick = () => {
+    vibrate(15);
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else {
+      document.exitFullscreen().catch(() => {});
     }
-    data.networks.forEach((n) => {
-      const item = document.createElement('div');
-      item.innerHTML = `
-        <span>📶 <b>${n.ssid}</b> (${n.rssi} dBm)</span>
-        <button class="pill-btn blue" style="padding:2px 8px;font-size:0.68rem">Save</button>
-      `;
-      item.querySelector('button').onclick = () => {
-        const pass = prompt(`Password for "${n.ssid}":`, '');
-        if (pass !== null) {
-          api(`/wifi/save?ssid=${encodeURIComponent(n.ssid)}&password=${encodeURIComponent(pass)}`)
-            .then(loadSavedWifi);
-        }
-      };
-      el.appendChild(item);
-    });
-  } catch (e) {
-    el.innerHTML = '<div style="color:var(--color-red)">Wi-Fi scan failed.</div>';
-  }
-};
+  };
+}
+
+// ================= WI-FI NETWORK MANAGEMENT (REST) =================
+if ($('scanWifiBtn')) {
+  $('scanWifiBtn').onclick = async () => {
+    vibrate(25);
+    const el = $('wifiNetworksList');
+    if (!el) return;
+    el.innerHTML = '<div style="color:var(--color-teal)">Scanning Wi-Fi...</div>';
+    try {
+      const data = await jsonApi('/wifi/scan');
+      el.innerHTML = '';
+      if (!data.networks || data.networks.length === 0) {
+        el.innerHTML = '<div>No networks found.</div>';
+        return;
+      }
+      data.networks.forEach((n) => {
+        const item = document.createElement('div');
+        item.innerHTML = `
+          <span>📶 <b>${n.ssid}</b> (${n.rssi} dBm)</span>
+          <button class="pill-btn blue" style="padding:2px 8px;font-size:0.68rem">Save</button>
+        `;
+        item.querySelector('button').onclick = () => {
+          const pass = prompt(`Password for "${n.ssid}":`, '');
+          if (pass !== null) {
+            api(`/wifi/save?ssid=${encodeURIComponent(n.ssid)}&password=${encodeURIComponent(pass)}`)
+              .then(loadSavedWifi);
+          }
+        };
+        el.appendChild(item);
+      });
+    } catch (e) {
+      el.innerHTML = '<div style="color:var(--color-red)">Wi-Fi scan failed.</div>';
+    }
+  };
+}
 
 async function loadSavedWifi() {
+  const el = $('savedWifiList');
+  if (!el) return;
   try {
     const data = await jsonApi('/wifi/saved');
-    const el = $('savedWifiList');
     el.innerHTML = '';
     if (!data.networks || data.networks.length === 0) {
       el.innerHTML = '<div>No networks saved.</div>';
@@ -497,7 +855,7 @@ async function loadSavedWifi() {
       item.innerHTML = `
         <span>${isSel ? '⭐ ' : ''}<b>${n.ssid}</b></span>
         <span>
-          <button class="pill-btn" style="padding:2px 6px;font-size:0.65rem">${isSel ? 'USE' : 'Use'}</button>
+          <button class="pill-btn" style="padding:2px 6px;font-size:0.65rem">${isSel ? 'ACTIVE' : 'Select'}</button>
           <button class="pill-btn red" style="padding:2px 6px;font-size:0.65rem">Del</button>
         </span>
       `;
@@ -510,54 +868,67 @@ async function loadSavedWifi() {
   } catch (e) {}
 }
 
-$('switchStaBtn').onclick = async () => {
-  vibrate(25);
-  try {
-    const res = await jsonApi('/wifi/switchSta');
-    applyHost(res.host);
-    alert(`Switched to STA mode. Connect phone to ${res.ssid} then use ${res.host}`);
-  } catch (e) {
-    alert('STA switch failed.');
-  }
-};
+if ($('switchStaBtn')) {
+  $('switchStaBtn').onclick = async () => {
+    vibrate(25);
+    try {
+      const res = await jsonApi('/wifi/switchSta');
+      applyHost(res.host);
+      alert(`Switched to STA mode. Connect phone to "${res.ssid}" then access ${res.host}`);
+    } catch (e) {
+      alert('STA switch failed. Make sure a saved network is selected.');
+    }
+  };
+}
 
-$('switchApBtn').onclick = async () => {
-  vibrate(25);
-  try {
-    await api('/wifi/switchAp');
-    applyHost('http://192.168.4.1');
-    alert('Switched to AP mode. Connect to NovaX-V2.');
-  } catch (e) {}
-};
+if ($('switchApBtn')) {
+  $('switchApBtn').onclick = async () => {
+    vibrate(25);
+    try {
+      await api('/wifi/switchAp');
+      applyHost('http://192.168.4.1');
+      alert('Switched to AP mode. Connect phone to "NovaX-Car".');
+    } catch (e) {
+      alert('AP switch request sent.');
+    }
+  };
+}
 
-// Firmware OTA
-$('fwUpdateBtn').onclick = async () => {
-  vibrate(35);
-  const file = $('fwFileInput').files[0];
-  if (!file) {
-    alert('Select an ESP32 .bin file first.');
-    return;
-  }
-  const token = $('otaTokenInput').value.trim() || 'NovaX-OTA-ChangeMe';
-  if (!confirm(`Flash "${file.name}" to ESP32? Robot will stop and restart.`)) return;
+// ================= ESP32 FIRMWARE OTA FLASH (REST) =================
+if ($('fwUpdateBtn')) {
+  $('fwUpdateBtn').onclick = async () => {
+    vibrate(35);
+    const file = $('fwFileInput')?.files[0];
+    if (!file) {
+      alert('Select an ESP32 .bin firmware file first.');
+      return;
+    }
+    const token = $('otaTokenInput')?.value.trim() || 'NovaX-OTA-ChangeMe';
+    if (!confirm(`Flash "${file.name}" to ESP32?\nAll motors will be safely stopped during update.`)) return;
 
-  const msg = $('fwMsg');
-  msg.textContent = 'Uploading firmware...';
-  try {
-    const res = await api('/ota/update', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream', 'X-NovaX-OTA': token },
-      body: file,
-      timeout: 60000
-    });
-    if (!res.ok) throw new Error(await res.text());
-    msg.textContent = 'Upload successful! ESP32 restarting...';
-  } catch (err) {
-    msg.textContent = `OTA Error: ${err.message}`;
-  }
-};
+    const msg = $('fwMsg');
+    if (msg) msg.textContent = 'Uploading firmware... Robot stopped.';
+    try {
+      const res = await api('/ota/update', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'X-NovaX-OTA': token
+        },
+        body: file,
+        timeout: 90000
+      });
+      if (!res.ok) throw new Error(await res.text());
+      if (msg) msg.textContent = 'Upload successful! ESP32 restarting in AP mode...';
+      alert('Firmware flashed successfully! ESP32 is rebooting.');
+    } catch (err) {
+      if (msg) msg.textContent = `OTA Error: ${err.message}`;
+      alert(`OTA Error: ${err.message}`);
+    }
+  };
+}
 
-// ================= GITHUB APP UPDATER SYSTEM =================
+// ================= GITHUB APP UPDATER (WITH INTEGRITY CHECK & ROLLBACK) =================
 const CURRENT_APP_VERSION = '2.2.0';
 
 function getGitHubConfig() {
@@ -585,17 +956,17 @@ async function checkGithubUpdates(interactive = true) {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     const remoteVer = (data.version || '').trim();
-    $('remoteAppVer').textContent = `v${remoteVer}`;
+    if ($('remoteAppVer')) $('remoteAppVer').textContent = `v${remoteVer}`;
 
     if (remoteVer && remoteVer !== activeVer) {
-      setUpdateLog(`New version: v${remoteVer} (Current: v${activeVer})`);
-      $('appUpdateBanner').style.display = 'flex';
-      $('updateBannerTitle').textContent = `NovaX v${remoteVer} Ready`;
-      if (data.changelog) $('updateBannerDesc').textContent = data.changelog;
+      setUpdateLog(`New version available: v${remoteVer} (Current: v${activeVer})`);
+      if ($('appUpdateBanner')) $('appUpdateBanner').style.display = 'flex';
+      if ($('updateBannerTitle')) $('updateBannerTitle').textContent = `NovaX v${remoteVer} Ready`;
+      if (data.changelog && $('updateBannerDesc')) $('updateBannerDesc').textContent = data.changelog;
       return data;
     } else {
-      setUpdateLog(`Up to date (v${activeVer})`);
-      if (interactive) alert(`NovaX is up to date (v${activeVer})!`);
+      setUpdateLog(`App is up to date (v${activeVer})`);
+      if (interactive) alert(`NovaX Controller is up to date (v${activeVer})!`);
       return null;
     }
   } catch (err) {
@@ -609,85 +980,124 @@ async function hotUpdateApp() {
   vibrate(30);
   const { repo, branch } = getGitHubConfig();
   const baseUrl = `https://raw.githubusercontent.com/${repo}/${branch}/pwa`;
-  setUpdateLog('Starting Hot Update from GitHub...', false);
+  setUpdateLog('Starting verified app update from GitHub...', false);
 
   try {
-    setUpdateLog('1/3 Fetching version.json...');
+    // 1. Fetch version.json
+    setUpdateLog('1/3 Fetching version metadata...');
     const verRes = await fetch(`${baseUrl}/version.json?t=${Date.now()}`, { cache: 'no-store' });
+    if (!verRes.ok) throw new Error(`Failed to fetch version.json: HTTP ${verRes.status}`);
     const verData = await verRes.json();
-    const newVer = verData.version || '2.2.0';
+    const newVer = (verData.version || '').trim();
+    if (!newVer) throw new Error('Invalid version in remote metadata');
 
+    // 2. Download and validate CSS
     setUpdateLog('2/3 Downloading style.css...');
     const cssRes = await fetch(`${baseUrl}/style.css?t=${Date.now()}`, { cache: 'no-store' });
+    if (!cssRes.ok) throw new Error(`Failed to fetch style.css: HTTP ${cssRes.status}`);
     const cssText = await cssRes.text();
+    if (cssText.length < 500) throw new Error('Downloaded CSS payload too small or truncated');
 
-    setUpdateLog('3/3 Downloading app.js...');
+    // 3. Download and strictly validate JS
+    setUpdateLog('3/3 Downloading and verifying app.js...');
     const jsRes = await fetch(`${baseUrl}/app.js?t=${Date.now()}`, { cache: 'no-store' });
+    if (!jsRes.ok) throw new Error(`Failed to fetch app.js: HTTP ${jsRes.status}`);
     const jsText = await jsRes.text();
 
+    if (jsText.length < 3000) throw new Error('Downloaded JS payload too small or truncated');
+
+    // Integrity check: verify required NovaX controller symbols
+    const requiredTokens = ['sendMove', 'stopCar', 'initWebSocket', 'NovaX'];
+    for (const token of requiredTokens) {
+      if (!jsText.includes(token)) {
+        throw new Error(`Integrity check failed: missing required token '${token}'`);
+      }
+    }
+
+    // Syntax validation check (compile without execution)
+    try {
+      new Function(jsText);
+    } catch (syntaxErr) {
+      throw new Error(`Syntax verification failed: ${syntaxErr.message}`);
+    }
+
+    // Validation passed: save to local storage
     localStorage.setItem('novax_hot_version', newVer);
     localStorage.setItem('novax_hot_css', cssText);
     localStorage.setItem('novax_hot_js', jsText);
 
-    setUpdateLog(`Installed! Reloading NovaX v${newVer}...`);
+    setUpdateLog(`Validation passed! Reloading NovaX v${newVer}...`);
     vibrate(40);
     setTimeout(() => window.location.reload(), 1200);
   } catch (err) {
-    setUpdateLog(`Update failed: ${err.message}`);
-    alert(`Update Error: ${err.message}`);
+    setUpdateLog(`Update aborted for safety: ${err.message}`);
+    alert(`Update Error: ${err.message}\nKeeping current working version.`);
   }
 }
 
 function factoryResetApp() {
   vibrate(25);
-  if (!confirm('Revert back to the factory bundled APK code?')) return;
-  localStorage.removeItem('novax_hot_version');
-  localStorage.removeItem('novax_hot_css');
-  localStorage.removeItem('novax_hot_js');
-  alert('Reset to bundle. Reloading...');
+  if (!confirm('Revert back to factory bundled APK version?\nThis will clear any downloaded hot updates.')) return;
+  try {
+    localStorage.removeItem('novax_hot_version');
+    localStorage.removeItem('novax_hot_css');
+    localStorage.removeItem('novax_hot_js');
+  } catch (e) {}
+  alert('Reset to bundle complete. Reloading...');
   window.location.reload();
 }
 
-$('checkGhUpdateBtn').onclick = () => checkGithubUpdates(true);
-$('hotUpdateBtn').onclick = hotUpdateApp;
-$('factoryResetAppBtn').onclick = factoryResetApp;
-$('downloadApkBtn').onclick = () => {
-  const { repo } = getGitHubConfig();
-  window.open(`https://github.com/${repo}/releases/latest`, '_blank');
-};
+if ($('checkGhUpdateBtn')) $('checkGhUpdateBtn').onclick = () => checkGithubUpdates(true);
+if ($('hotUpdateBtn')) $('hotUpdateBtn').onclick = hotUpdateApp;
+if ($('factoryResetAppBtn')) $('factoryResetAppBtn').onclick = factoryResetApp;
+if ($('downloadApkBtn')) {
+  $('downloadApkBtn').onclick = () => {
+    const { repo } = getGitHubConfig();
+    window.open(`https://github.com/${repo}/releases/latest`, '_blank');
+  };
+}
 
-$('bannerUpdateBtn').onclick = () => {
-  $('appUpdateBanner').style.display = 'none';
-  hotUpdateApp();
-};
-$('bannerDismissBtn').onclick = () => {
-  $('appUpdateBanner').style.display = 'none';
-};
+if ($('bannerUpdateBtn')) {
+  $('bannerUpdateBtn').onclick = () => {
+    if ($('appUpdateBanner')) $('appUpdateBanner').style.display = 'none';
+    hotUpdateApp();
+  };
+}
+if ($('bannerDismissBtn')) {
+  $('bannerDismissBtn').onclick = () => {
+    if ($('appUpdateBanner')) $('appUpdateBanner').style.display = 'none';
+  };
+}
 
-// ================= INITIALIZATION =================
+// ================= APP INITIALIZATION =================
 window.addEventListener('DOMContentLoaded', () => {
-  $('hostUrlInput').value = base;
+  if ($('hostUrlInput')) $('hostUrlInput').value = base;
 
   const savedRepo = localStorage.getItem('novax_gh_repo') || 'onebotyt/robocar';
   if ($('ghRepoInput')) $('ghRepoInput').value = savedRepo;
 
   const activeVer = localStorage.getItem('novax_hot_version') || CURRENT_APP_VERSION;
-  $('installedAppVer').textContent = `v${activeVer}`;
+  if ($('installedAppVer')) $('installedAppVer').textContent = `v${activeVer}`;
 
+  // 1. Initialize Primary WebSocket connection (:81)
+  initWebSocket();
+
+  // 2. Load saved Wi-Fi networks & initial HTTP status
   loadSavedWifi();
   updateStatus();
-  setInterval(updateStatus, 1200);
+  setInterval(updateStatus, 2000);
 
+  // 3. Handle window resizing for Canvas Draw Mode
   window.addEventListener('resize', () => {
     if (isDrawMode) resizeCanvas();
   });
 
-  // Check GitHub updates on startup if online
+  // 4. Check GitHub updates if internet is available
   if (navigator.onLine && savedRepo) {
     setTimeout(() => checkGithubUpdates(false), 2500);
   }
 
-  // Register service worker for offline app loading
+  // 5. Register Service Worker for offline PWA caching
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('./sw.js').catch(() => {});
   }

@@ -45,6 +45,7 @@
         <span class="brand-dot" id="liveDot"></span>
         <span class="brand-name">NOVA-X</span>
         <span class="brand-ver" id="fwVerHeader">V2.2</span>
+        <span class="comm-badge" id="commBadge" title="Protocol Link">OFF</span>
       </div>
 
       <!-- Quick Action Badges -->
@@ -306,19 +307,39 @@
 
   </div>
 
-  <!-- Dynamic In-App Hot JS Loader (GitHub OTA) -->
+  <!-- Dynamic In-App Hot JS Loader with Automatic Bundled Fallback -->
   <script>
     (function() {
+      var hotJs = null;
       try {
-        var hotJs = localStorage.getItem('novax_hot_js');
-        if (hotJs) {
+        hotJs = localStorage.getItem('novax_hot_js');
+      } catch (e) {}
+
+      if (hotJs && hotJs.length > 500) {
+        try {
           var s = document.createElement('script');
           s.id = 'novaxHotScript';
           s.textContent = hotJs;
+          // Safety error listener to detect immediate evaluation crash
+          window.addEventListener('error', function onHotErr(ev) {
+            console.error('NovaX Hot script error detected. Rolling back to bundled app.js:', ev);
+            try {
+              localStorage.removeItem('novax_hot_js');
+              localStorage.removeItem('novax_hot_css');
+              localStorage.removeItem('novax_hot_version');
+            } catch (ex) {}
+            window.removeEventListener('error', onHotErr);
+            window.location.reload();
+          }, { once: true });
           document.body.appendChild(s);
           return;
+        } catch (err) {
+          console.warn('Hot script launch failed, using bundled code:', err);
+          try {
+            localStorage.removeItem('novax_hot_js');
+          } catch (e) {}
         }
-      } catch (e) {}
+      }
       var s = document.createElement('script');
       s.src = 'app.js';
       document.body.appendChild(s);

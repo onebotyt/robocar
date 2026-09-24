@@ -1,7 +1,7 @@
 {
   "version": "2.2.0",
   "buildDate": "2026-09-24",
-  "changelog": "Mobile Cyber Cockpit, Dual D-Pad & Joystick, 180° Radar, and GitHub App Updater",
+  "changelog": "NovaX V2 Production Release: Real-time RFC 6455 WebSocket (:81), ESP32 400ms Motor Safety Watchdog, MPU6050 & Radar sweep telemetry, AP-first Wi-Fi, and Dual-channel fallback.",
   "repo": "onebotyt/robocar",
   "branch": "main",
   "apkUrl": "https://github.com/onebotyt/robocar/releases/latest"
