@@ -34,18 +34,12 @@ jobs:
       - name: Make Gradlew Executable
         run: chmod +x android/gradlew
 
+      - name: Sync Capacitor
+        run: npx cap sync android
+
       - name: Build Debug APK
-        run: |
-          cd android
-          ./gradlew assembleDebug --no-daemon 2>&1 | tee ../gradle-build.log || true
-          echo "### Gradle Build Log" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          tail -n 120 ../gradle-build.log >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          if ! find app/build/outputs/apk/ -name "*.apk" | grep -q apk; then
-            echo "APK build failed. See log above."
-            exit 1
-          fi
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Collect Generated APK
         run: |

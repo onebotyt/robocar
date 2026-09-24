@@ -3,6 +3,7 @@ node_modules/
 Thumbs.db
 *.log
 npm-debug.log*
+*.zip
 
 # Android build outputs
 android/.gradle/
