@@ -639,11 +639,15 @@ void pollWebSocketServer() {
   for (int i = 0; i < MAX_WS_CLIENTS; i++) {
     if (!wsClients[i]) continue;
     if (!wsClients[i].connected()) {
-      Serial.printf("[WS] Client disconnected on slot %d — stopping motors\n", i);
+      Serial.printf("[WS] Client disconnected on slot %d — emergency stop\n", i);
       wsClients[i].stop();
-      // [A5] Stop motors on disconnect; carStopped flag stays as-is so that
-      //      a fresh connect + start message is required to resume driving.
+      // [A5 FIXED] On disconnect: hard-stop motors AND set carStopped=true.
+      // A reconnected client MUST send {"type":"start"} before any driving.
+      // This prevents stale auto-drive or a second client taking over silently.
       stopCar();
+      carStopped  = true;
+      rotateState = ROT_IDLE;
+      if (!manualMode) autoState = AUTO_STOPPED;
       continue;
     }
 
