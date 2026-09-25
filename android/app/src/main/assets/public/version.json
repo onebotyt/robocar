@@ -1,13 +1,13 @@
 {
-  "version": "2.4.37",
-  "buildCode": 37,
-  "buildDate": "2026-09-25",
-  "changelog": "NovaX V2.4.37: 1-Tap offline flashing for pre-downloaded firmware, instant offline detection, and Bootstrap OTA cockpit banner.",
+  "version": "2.4.38",
+  "buildCode": 38,
+  "buildDate": "2026-09-26",
+  "changelog": "NovaX V2.4.38: Dedicated non-FIFO OV7670 I2S DMA camera engine with dual JPEG/BMP streaming and auto-fallback.",
   "firmware": {
-    "version": "2.4.37",
+    "version": "2.4.38",
     "binUrl": "https://raw.githubusercontent.com/onebotyt/robocar/main/firmware/NovaX-Firmware.bin",
-    "releaseDate": "2026-09-25",
-    "changelog": "ESP32 V2.4.37: Added /update OTA alias, query parameter token support, and wildcard CORS headers."
+    "releaseDate": "2026-09-26",
+    "changelog": "ESP32 V2.4.38: Native non-FIFO OV7670 parallel I2S DMA driver, /cam.bmp and /cam.jpg endpoints, fixing FB-SIZE mismatch."
   },
   "repo": "onebotyt/robocar",
   "branch": "main",

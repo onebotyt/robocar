@@ -1060,6 +1060,7 @@ if ($('servoRightBtn')) {
 let camTimer = null;
 let camFrameCount = 0;
 let lastFpsTime = performance.now();
+let preferBmp = false;
 
 if ($('openCamModalBtn') && $('cameraModal')) {
   $('openCamModalBtn').onclick = () => {
@@ -1078,10 +1079,14 @@ function fetchCamFrame() {
   const img = $('cam');
   if (!img) return;
   const tempImg = new Image();
-  const frameUrl = `${base}/cam.jpg?t=${Date.now()}`;
+  const endpoint = preferBmp ? '/cam.bmp' : '/cam.jpg';
+  const frameUrl = `${base}${endpoint}?t=${Date.now()}`;
 
   tempImg.onload = () => {
+    if (!camOn) return;
     img.src = frameUrl;
+    const standby = $('camStandby');
+    if (standby) standby.classList.remove('active');
     camFrameCount++;
     const now = performance.now();
     if (now - lastFpsTime >= 1000) {
@@ -1089,11 +1094,14 @@ function fetchCamFrame() {
       camFrameCount = 0;
       lastFpsTime = now;
     }
-    if (camOn) camTimer = setTimeout(fetchCamFrame, 350);
+    if (camOn) camTimer = setTimeout(fetchCamFrame, 150);
   };
 
   tempImg.onerror = () => {
-    if (camOn) camTimer = setTimeout(fetchCamFrame, 1000);
+    if (!camOn) return;
+    // Automatic fallback between JPG and raw BMP stream
+    preferBmp = !preferBmp;
+    if (camOn) camTimer = setTimeout(fetchCamFrame, 400);
   };
 
   tempImg.src = frameUrl;
@@ -1494,7 +1502,7 @@ async function flashCloudOta() {
 }
 
 // ================= GITHUB APP UPDATER (WITH INTEGRITY CHECK & ROLLBACK) =================
-const CURRENT_APP_VERSION = '2.4.37';
+const CURRENT_APP_VERSION = '2.4.38';
 
 function getGitHubConfig() {
   const repo = $('ghRepoInput')?.value.trim() || localStorage.getItem('novax_gh_repo') || 'onebotyt/robocar';

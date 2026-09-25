@@ -67,6 +67,7 @@
 #undef sensor_t
 #include <esp_camera.h>
 #include <img_converters.h>
+#include "OV7670_NonFIFO.h"
 #include <Preferences.h>
 #include <ESPmDNS.h>
 #include <Update.h>
@@ -155,6 +156,7 @@ float         gyroZBias     = 0.0f;
 float         yawHeading    = 0.0f;
 unsigned long lastGyroMicros = 0;
 // Camera State
+GitHubOV7670 nonFifoCam;
 bool cameraAvailable = false;
 // 74HC595 LED State
 String        currentLedEffect = "off";
@@ -393,81 +395,110 @@ void stepNonBlockingRotate() {
   }
 }
 // ===================================================================================
-// 6. OV7670 CAMERA (NON-FIFO RGB565 -> JPEG)
+// 6. NON-FIFO OV7670 CAMERA ENGINE (DIRECT I2S DMA -> JPEG / BMP)
 // ===================================================================================
+// 66-byte BMP Header for 160x120 16-bit RGB565 (Top-down uncompressed bitmap)
+static const uint8_t BMP_HEADER_QQVGA_RGB565[66] = {
+  0x42, 0x4D,             // 'BM'
+  0x42, 0x96, 0x00, 0x00, // Total size: 66 + 38400 = 38466 bytes
+  0x00, 0x00, 0x00, 0x00, // Reserved
+  0x42, 0x00, 0x00, 0x00, // Offset to pixel data: 66 bytes
+  0x28, 0x00, 0x00, 0x00, // DIB Header size: 40 bytes
+  0xA0, 0x00, 0x00, 0x00, // Width: 160
+  0x88, 0xFF, 0xFF, 0xFF, // Height: -120 (negative = top-down)
+  0x01, 0x00,             // Planes: 1
+  0x10, 0x00,             // Bits per pixel: 16 (RGB565)
+  0x03, 0x00, 0x00, 0x00, // Compression: BI_BITFIELDS
+  0x00, 0x96, 0x00, 0x00, // Raw image size: 38400 bytes
+  0x13, 0x0B, 0x00, 0x00, // X pixels/m: 2835
+  0x13, 0x0B, 0x00, 0x00, // Y pixels/m: 2835
+  0x00, 0x00, 0x00, 0x00, // Colors: 0
+  0x00, 0x00, 0x00, 0x00, // Important colors: 0
+  // BI_BITFIELDS masks for RGB565:
+  0x00, 0xF8, 0x00, 0x00, // Red mask:   0xF800
+  0xE0, 0x07, 0x00, 0x00, // Green mask: 0x07E0
+  0x1F, 0x00, 0x00, 0x00  // Blue mask:  0x001F
+};
+
+static uint8_t rawFrameBuffer[160 * 120 * 2]; // 38,400 bytes
+
 bool initCamera() {
-  camera_config_t cfg;
+  github_camera_config_t cfg = {};
+  cfg.D0 = CAM_D0;
+  cfg.D1 = CAM_D1;
+  cfg.D2 = CAM_D2;
+  cfg.D3 = CAM_D3;
+  cfg.D4 = CAM_D4;
+  cfg.D5 = CAM_D5;
+  cfg.D6 = CAM_D6;
+  cfg.D7 = CAM_D7;
+  cfg.XCLK = CAM_XCLK;
+  cfg.PCLK = CAM_PCLK;
+  cfg.VSYNC = CAM_VSYNC;
+  cfg.xclk_freq_hz = 10000000;
+  cfg.ledc_timer = LEDC_TIMER_0;
   cfg.ledc_channel = LEDC_CHANNEL_0;
-  cfg.ledc_timer   = LEDC_TIMER_0;
-  cfg.pin_d0       = CAM_D0;
-  cfg.pin_d1       = CAM_D1;
-  cfg.pin_d2       = CAM_D2;
-  cfg.pin_d3       = CAM_D3;
-  cfg.pin_d4       = CAM_D4;
-  cfg.pin_d5       = CAM_D5;
-  cfg.pin_d6       = CAM_D6;
-  cfg.pin_d7       = CAM_D7;
-  cfg.pin_xclk     = CAM_XCLK;
-  cfg.pin_pclk     = CAM_PCLK;
-  cfg.pin_vsync    = CAM_VSYNC;
-  cfg.pin_href     = CAM_HREF;
-  cfg.pin_sccb_sda = CAM_SIOD;
-  cfg.pin_sccb_scl = CAM_SIOC;
-  cfg.pin_pwdn     = -1;
-  cfg.pin_reset    = -1;
-  cfg.xclk_freq_hz = 20000000;
-  cfg.pixel_format = PIXFORMAT_RGB565;
-  cfg.frame_size   = FRAMESIZE_QQVGA; // 160x120
-  cfg.jpeg_quality = 12;
-  cfg.fb_count     = 1;
-  cfg.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
-  cfg.fb_location  = CAMERA_FB_IN_DRAM;
-  esp_err_t err = esp_camera_init(&cfg);
+
+  esp_err_t err = nonFifoCam.init(&cfg, QQVGA, RGB565);
   if (err != ESP_OK) {
-    Serial.printf("[CAMERA] OV7670 Init failed: 0x%x\n", err);
+    Serial.printf("[CAMERA] Non-FIFO OV7670 init failed: 0x%X\n", err);
     return false;
   }
-  // [A10] Renamed local var to avoid any scope confusion after sensor_t #undef
-  sensor_t* camSensor = esp_camera_sensor_get();
-  if (camSensor) {
-    camSensor->set_vflip(camSensor, 1);
-    camSensor->set_hmirror(camSensor, 0);
-  }
-  Serial.println("[CAMERA] OV7670 Initialized successfully.");
+  nonFifoCam.vflip(false);
+  Serial.println("[CAMERA] Non-FIFO OV7670 (I2S DMA) Initialized successfully!");
   return true;
 }
+
+void handleCameraBmp() {
+  if (!cameraAvailable) {
+    restServer.send(503, "text/plain", "Camera unavailable");
+    return;
+  }
+  if (!nonFifoCam.getFrame(rawFrameBuffer)) {
+    Serial.println("[CAMERA] getFrame failed");
+    restServer.send(503, "text/plain", "Frame acquisition failed");
+    return;
+  }
+  size_t total = sizeof(BMP_HEADER_QQVGA_RGB565) + sizeof(rawFrameBuffer);
+  WiFiClient client = restServer.client();
+  client.print("HTTP/1.1 200 OK\r\n"
+               "Content-Type: image/bmp\r\n"
+               "Content-Length: " + String(total) + "\r\n"
+               "Access-Control-Allow-Origin: *\r\n"
+               "Cache-Control: no-store, no-cache, must-revalidate\r\n"
+               "Connection: close\r\n\r\n");
+  client.write(BMP_HEADER_QQVGA_RGB565, sizeof(BMP_HEADER_QQVGA_RGB565));
+  client.write(rawFrameBuffer, sizeof(rawFrameBuffer));
+}
+
 void handleCameraSnapshot() {
   if (!cameraAvailable) {
     restServer.send(503, "text/plain", "Camera unavailable");
     return;
   }
-  camera_fb_t* fb = esp_camera_fb_get();
-  if (!fb) {
-    Serial.println("[CAMERA] Frame acquisition failed");
+  if (!nonFifoCam.getFrame(rawFrameBuffer)) {
+    Serial.println("[CAMERA] getFrame failed");
     restServer.send(503, "text/plain", "Frame acquisition failed");
     return;
   }
-  Serial.printf(
-    "[CAMERA] Frame: %ux%u len=%u format=%d\n",
-    fb->width,
-    fb->height,
-    (unsigned)fb->len,
-    fb->format
-  );
+
   uint8_t* jpgBuf = nullptr;
   size_t   jpgSize = 0;
-  bool converted = frame2jpg(fb, 55, &jpgBuf, &jpgSize);
-  esp_camera_fb_return(fb);
-  if (!converted || !jpgBuf) {
-    restServer.send(500, "text/plain", "JPEG compression failed");
-    return;
+  bool ok = fmt2jpg(rawFrameBuffer, sizeof(rawFrameBuffer), 160, 120, PIXFORMAT_RGB565, 60, &jpgBuf, &jpgSize);
+  if (ok && jpgBuf && jpgSize > 0) {
+    WiFiClient client = restServer.client();
+    client.print("HTTP/1.1 200 OK\r\n"
+                 "Content-Type: image/jpeg\r\n"
+                 "Content-Length: " + String(jpgSize) + "\r\n"
+                 "Access-Control-Allow-Origin: *\r\n"
+                 "Cache-Control: no-store, no-cache, must-revalidate\r\n"
+                 "Connection: close\r\n\r\n");
+    client.write(jpgBuf, jpgSize);
+    free(jpgBuf);
+  } else {
+    // Instant fallback to raw BMP if JPEG compression fails
+    handleCameraBmp();
   }
-  restServer.sendHeader("Access-Control-Allow-Origin", "*");
-  restServer.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate");
-  restServer.setContentLength(jpgSize);
-  restServer.send(200, "image/jpeg");
-  restServer.client().write(jpgBuf, jpgSize);
-  free(jpgBuf);
 }
 // ===================================================================================
 // 7. RFC 6455 WEBSOCKET ENGINE (PORT 81)
@@ -1161,6 +1192,7 @@ void setup() {
   restServer.on("/status",         HTTP_GET,  handleStatus);
   restServer.on("/path",           HTTP_POST, handlePathUpload);
   restServer.on("/cam.jpg",        HTTP_GET,  handleCameraSnapshot);
+  restServer.on("/cam.bmp",        HTTP_GET,  handleCameraBmp);
   restServer.on("/ota/status",     HTTP_GET,  handleFirmwareInfo);
   restServer.on("/ota/update",     HTTP_POST, handleOtaFinish, handleOtaUpload);
   restServer.on("/update",         HTTP_POST, handleOtaFinish, handleOtaUpload);
