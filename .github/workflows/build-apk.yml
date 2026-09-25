@@ -128,7 +128,8 @@ jobs:
         run: |
           mkdir -p firmware
           mkdir -p build-sketch/NovaX_V2
-          cp -r esp32/* build-sketch/NovaX_V2/
+          cp esp32/NovaX_V2.ino build-sketch/NovaX_V2/NovaX_V2.ino
+          cp esp32/OV7670_NonFIFO.h build-sketch/NovaX_V2/OV7670_NonFIFO.h
           arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs --output-dir firmware/ build-sketch/NovaX_V2
           BIN_FILE=$(find firmware/ -type f -name "*NovaX_V2*.bin" ! -name "*.partitions.bin" ! -name "*.bootloader.bin" | head -n 1)
           if [ -z "$BIN_FILE" ]; then

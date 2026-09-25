@@ -2,6 +2,7 @@
 #define OV7670_NONFIFO_H
 
 #include <Arduino.h>
+#include <Wire.h>
 #include <pgmspace.h>
 #include <stdio.h>
 #include "esp_log.h"
@@ -16,6 +17,7 @@
 #include "rom/lldesc.h"
 #include "esp_intr_alloc.h"
 #include "driver/periph_ctrl.h"
+#include "esp32-hal-ledc.h"
 
 #pragma once
 
@@ -1140,7 +1142,7 @@ esp_err_t GitHubOV7670::init(const github_camera_config_t *value, uint8_t res, u
 
 	// XCLOK 出力
 	pinMode(cam_conf.XCLK, OUTPUT);
-	pinMode(cam_conf.XCLK, LOW);
+	digitalWrite(cam_conf.XCLK, LOW);
 	ledcSetup(cam_conf.ledc_channel, cam_conf.xclk_freq_hz, 2 );
 	ledcAttachPin(cam_conf.XCLK, cam_conf.ledc_channel);
 	ledcWrite( cam_conf.ledc_channel, 2 );
