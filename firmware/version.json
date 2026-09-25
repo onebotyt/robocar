@@ -1,8 +1,8 @@
 {
-  "version": "2.4.38",
+  "version": "2.4.43",
   "buildDate": "2026-09-25",
   "target": "ESP32-WROOM-32",
   "binFile": "NovaX-Firmware.bin",
   "downloadUrl": "https://raw.githubusercontent.com/onebotyt/robocar/main/firmware/NovaX-Firmware.bin",
-  "changelog": "NovaX V2.4.37: 1-Tap offline flashing for pre-downloaded firmware, instant offline detection, and Bootstrap OTA cockpit banner."
+  "changelog": "NovaX V2.4.38: Dedicated non-FIFO OV7670 I2S DMA camera engine with dual JPEG/BMP streaming and auto-fallback."
 }
