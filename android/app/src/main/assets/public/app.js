@@ -286,13 +286,13 @@ function initWebSocket() {
     lastWsMessageTime = Date.now();
     setConnectionState(true, 'WS');
 
-    // Start keepalive heartbeat ping every 2000ms with strict dead-socket detection
+    // Start keepalive heartbeat ping every 1000ms with fast 1800ms silence detection
     clearInterval(wsPingTimer);
     wsPingTimer = setInterval(() => {
       if (wsConnected) {
-        // If ESP32 has been completely silent for > 3500ms (e.g. power disconnected):
-        if (Date.now() - lastWsMessageTime > 3500) {
-          console.warn('[NovaX-WS] Ping timeout! ESP32 silent for >3.5s (power off). Forcing disconnect.');
+        // If ESP32 has been silent for > 1800ms (e.g. power disconnected):
+        if (Date.now() - lastWsMessageTime > 1800) {
+          console.warn('[NovaX-WS] Ping timeout: ESP32 silent for >1.8s (power cut). Forcing disconnect.');
           wsConnected = false;
           try { ws.close(); } catch (e) {}
           setConnectionState(false);
@@ -301,7 +301,7 @@ function initWebSocket() {
         }
         sendWs({ type: 'ping' });
       }
-    }, 2000);
+    }, 1000);
   };
 
   ws.onmessage = (event) => {
@@ -319,18 +319,15 @@ function initWebSocket() {
   ws.onerror = (err) => {
     console.warn('[NovaX-WS] Error encountered:', err);
     wsConnected = false;
+    setConnectionState(false);
   };
 
   ws.onclose = () => {
     console.log('[NovaX-WS] Disconnected.');
     wsConnected = false;
     clearInterval(wsPingTimer);
-    // ONLY remain in HTTP connected state if a REAL HTTP request succeeded in the last 2500ms
-    if (Date.now() - lastHttpSuccessTime < 2500) {
-      setConnectionState(true, 'HTTP');
-    } else {
-      setConnectionState(false);
-    }
+    // Never assume HTTP is connected on WebSocket drop — declare offline immediately
+    setConnectionState(false);
     scheduleWsReconnect();
   };
 }
@@ -344,12 +341,21 @@ function scheduleWsReconnect() {
 }
 
 function sendWs(payload) {
+  // If silent for > 1800ms, socket is dead (power off) — don't report success
+  if (wsConnected && (Date.now() - lastWsMessageTime > 1800)) {
+    wsConnected = false;
+    try { if (ws) ws.close(); } catch(e) {}
+    setConnectionState(false);
+    return false;
+  }
   if (ws && ws.readyState === WebSocket.OPEN) {
     try {
       ws.send(typeof payload === 'string' ? payload : JSON.stringify(payload));
       return true;
     } catch (e) {
       console.warn('[NovaX-WS] Send failed:', e);
+      wsConnected = false;
+      setConnectionState(false);
     }
   }
   return false;
@@ -526,35 +532,43 @@ function handleWsPayload(data) {
 }
 
 // ================= PERIODIC STATUS CHECK (HTTP REST FALLBACK) =================
+let isStatusUpdating = false;
+
 async function updateStatus() {
-  // If WebSocket is actively receiving messages within the last 2500ms, skip HTTP poll
-  if (wsConnected && (Date.now() - lastWsMessageTime < 2500)) {
-    return;
-  }
-  if (wsConnected && (Date.now() - lastWsMessageTime > 3500)) {
-    wsConnected = false;
-    try { if (ws) ws.close(); } catch (e) {}
-    setConnectionState(false);
-  }
+  if (isStatusUpdating) return;
+  isStatusUpdating = true;
 
   try {
+    // If WebSocket has been silent for > 1800ms, car is powered off or unreachable
+    if (wsConnected && (Date.now() - lastWsMessageTime > 1800)) {
+      console.warn('[NovaX] WS silent for >1.8s, declaring dead socket.');
+      wsConnected = false;
+      try { if (ws) ws.close(); } catch (e) {}
+      setConnectionState(false);
+    }
+
+    // While WebSocket is actively receiving messages, skip heavy HTTP poll
+    if (wsConnected && (Date.now() - lastWsMessageTime <= 1800)) {
+      return;
+    }
+
+    // Fast HTTP probe with strict 1200ms timeout
     let data = null;
     try {
-      data = await jsonApi('/status', { timeout: 2000 });
+      data = await jsonApi('/status', { timeout: 1200 });
     } catch (e1) {
-      try {
-        data = await jsonApi('/firmware', { timeout: 2000 });
-      } catch (e2) {
+      // Only check /firmware if /status gave HTTP 404 (endpoint missing on bootstrap)
+      if (e1.message && e1.message.includes('HTTP 404')) {
         try {
-          data = await jsonApi('/ota/status', { timeout: 2000 });
-        } catch (e3) {
-          data = null;
-        }
+          data = await jsonApi('/firmware', { timeout: 1200 });
+        } catch (e2) {}
       }
     }
 
     if (!data) {
-      throw new Error('ESP32 not responding on HTTP');
+      lastHttpSuccessTime = 0;
+      setConnectionState(false);
+      return;
     }
 
     lastHttpSuccessTime = Date.now();
@@ -605,10 +619,11 @@ async function updateStatus() {
       if ($('fwVerHeader')) $('fwVerHeader').textContent = `ESP v${ver}`;
     }
   } catch (err) {
-    if (!wsConnected || (Date.now() - lastWsMessageTime > 3000)) {
-      wsConnected = false;
-      setConnectionState(false);
-    }
+    lastHttpSuccessTime = 0;
+    wsConnected = false;
+    setConnectionState(false);
+  } finally {
+    isStatusUpdating = false;
   }
 }
 
@@ -625,18 +640,33 @@ async function sendMove(cmd, speed = 180) {
 
   currentMoveCmd = cmd;
 
+  // Check if WebSocket is silent / dead (>1800ms)
+  if (wsConnected && (Date.now() - lastWsMessageTime > 1800)) {
+    console.warn('[NovaX] Drive command: WebSocket dead (no pong for >1.8s).');
+    wsConnected = false;
+    try { if (ws) ws.close(); } catch(e) {}
+    setConnectionState(false);
+  }
+
   // 1. Primary: Send via WebSocket text frame
-  const sent = sendWs({
-    type: 'move',
-    dir: cmd,
-    speed: speed
-  });
+  let sent = false;
+  if (wsConnected) {
+    sent = sendWs({
+      type: 'move',
+      dir: cmd,
+      speed: speed
+    });
+  }
 
   // 2. Fallback: If WebSocket is disconnected, send HTTP REST command
   if (!sent) {
     try {
-      await api(`/move?d=${cmd}&speed=${speed}`);
-    } catch (e) {}
+      await api(`/move?d=${cmd}&speed=${speed}`, { timeout: 1000 });
+      lastHttpSuccessTime = Date.now();
+      setConnectionState(true, 'HTTP');
+    } catch (e) {
+      setConnectionState(false);
+    }
   }
 }
 
@@ -1393,7 +1423,7 @@ async function flashCloudOta() {
 }
 
 // ================= GITHUB APP UPDATER (WITH INTEGRITY CHECK & ROLLBACK) =================
-const CURRENT_APP_VERSION = '2.4.33';
+const CURRENT_APP_VERSION = '2.4.36';
 
 function getGitHubConfig() {
   const repo = $('ghRepoInput')?.value.trim() || localStorage.getItem('novax_gh_repo') || 'onebotyt/robocar';
@@ -1529,17 +1559,19 @@ async function hotUpdateApp(force = false) {
   }
 }
 
-function factoryResetApp() {
+async function factoryResetApp() {
   vibrate(25);
-  if (!confirm('Revert back to factory bundled APK version?\nThis will clear any downloaded hot updates.')) return;
+  if (!confirm('Revert back to factory bundled version?\nThis will clear cached updates, reset offline status and reload cleanly.')) return;
   try {
-    localStorage.removeItem('novax_hot_version');
-    localStorage.removeItem('novax_hot_html');
-    localStorage.removeItem('novax_hot_css');
-    localStorage.removeItem('novax_hot_js');
+    localStorage.clear();
+    sessionStorage.clear();
+    if ('caches' in window) {
+      const keys = await caches.keys();
+      for (const k of keys) await caches.delete(k);
+    }
   } catch (e) {}
   alert('Reset to bundle complete. Reloading...');
-  window.location.reload();
+  window.location.href = window.location.pathname + '?clean=' + Date.now();
 }
 
 if ($('checkGhUpdateBtn')) $('checkGhUpdateBtn').onclick = () => checkGithubUpdates(true);
@@ -1612,7 +1644,7 @@ window.addEventListener('DOMContentLoaded', () => {
   // 2. Load saved Wi-Fi networks & initial HTTP status
   loadSavedWifi();
   updateStatus();
-  setInterval(updateStatus, 2000);
+  setInterval(updateStatus, 1500);
 
   // 3. Update offline firmware cache status display
   updateCachedFwStatus();
@@ -1632,7 +1664,15 @@ window.addEventListener('DOMContentLoaded', () => {
     }, 2500);
   }
 
-  // 6. Register Service Worker for offline PWA caching
+  // 6. Network offline event listener (detects immediate Wi-Fi disconnect)
+  window.addEventListener('offline', () => {
+    console.warn('[NovaX] Wi-Fi network offline event detected.');
+    wsConnected = false;
+    try { if (ws) ws.close(); } catch(e) {}
+    setConnectionState(false);
+  });
+
+  // 7. Register Service Worker for offline PWA caching
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('./sw.js').catch(() => {});
   }
