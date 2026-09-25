@@ -275,13 +275,22 @@ function initWebSocket() {
     lastWsMessageTime = Date.now();
     setConnectionState(true, 'WS');
 
-    // Start keepalive heartbeat ping every 3000ms
+    // Start keepalive heartbeat ping every 2000ms with strict dead-socket detection
     clearInterval(wsPingTimer);
     wsPingTimer = setInterval(() => {
       if (wsConnected) {
+        // If ESP32 has been completely silent for > 3500ms (e.g. power disconnected):
+        if (Date.now() - lastWsMessageTime > 3500) {
+          console.warn('[NovaX-WS] Ping timeout! ESP32 silent for >3.5s (power off). Forcing disconnect.');
+          wsConnected = false;
+          try { ws.close(); } catch (e) {}
+          setConnectionState(false);
+          scheduleWsReconnect();
+          return;
+        }
         sendWs({ type: 'ping' });
       }
-    }, 3000);
+    }, 2000);
   };
 
   ws.onmessage = (event) => {
@@ -506,9 +515,13 @@ function handleWsPayload(data) {
 
 // ================= PERIODIC STATUS CHECK (HTTP REST FALLBACK) =================
 async function updateStatus() {
-  // If WebSocket is actively receiving messages, reduce HTTP poll frequency
-  if (wsConnected && (Date.now() - lastWsMessageTime < 5000)) {
+  // If WebSocket is actively receiving messages within the last 2500ms, skip HTTP poll
+  if (wsConnected && (Date.now() - lastWsMessageTime < 2500)) {
     return;
+  }
+  if (wsConnected && (Date.now() - lastWsMessageTime > 3500)) {
+    wsConnected = false;
+    try { if (ws) ws.close(); } catch (e) {}
   }
 
   try {
@@ -567,9 +580,9 @@ async function updateStatus() {
       const ver = data.version || data.firmware;
       if ($('fwVersionVal')) $('fwVersionVal').textContent = `v${ver}`;
       if ($('fwVerHeader')) $('fwVerHeader').textContent = `ESP v${ver}`;
-    }
   } catch (err) {
-    if (!wsConnected) {
+    if (!wsConnected || (Date.now() - lastWsMessageTime > 3000)) {
+      wsConnected = false;
       setConnectionState(false);
     }
   }
