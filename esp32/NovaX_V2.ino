@@ -415,7 +415,7 @@ bool initCamera() {
   cfg.pin_sccb_scl = CAM_SIOC;
   cfg.pin_pwdn     = -1;
   cfg.pin_reset    = -1;
-  cfg.xclk_freq_hz = 10000000;
+  cfg.xclk_freq_hz = 20000000;
   cfg.pixel_format = PIXFORMAT_RGB565;
   cfg.frame_size   = FRAMESIZE_QQVGA; // 160x120
   cfg.jpeg_quality = 12;
@@ -443,9 +443,17 @@ void handleCameraSnapshot() {
   }
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) {
+    Serial.println("[CAMERA] Frame acquisition failed");
     restServer.send(503, "text/plain", "Frame acquisition failed");
     return;
   }
+  Serial.printf(
+    "[CAMERA] Frame: %ux%u len=%u format=%d\n",
+    fb->width,
+    fb->height,
+    (unsigned)fb->len,
+    fb->format
+  );
   uint8_t* jpgBuf = nullptr;
   size_t   jpgSize = 0;
   bool converted = frame2jpg(fb, 55, &jpgBuf, &jpgSize);
