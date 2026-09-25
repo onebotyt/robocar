@@ -50,10 +50,7 @@ uint16_t* camera_getLine(uint16_t lineno);
 //uint16_t* camera_getFrame(void);
 
 
-#ifndef OV7670_h_
-#define OV7670_h_
-
-
+// Resolution defines
 #define	VGA	0	// 640 x 480
 #define	QVGA	1	// 320 X 240
 #define	QQVGA	2	// 160 x 120
