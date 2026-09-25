@@ -24,7 +24,7 @@
   <script>
     (function() {
       // BUNDLE_VERSION must match CURRENT_APP_VERSION in app.js
-      var BUNDLE_VERSION = '2.4.25';
+      var BUNDLE_VERSION = '2.4.28';
       try {
         var params = new URLSearchParams(window.location.search);
         if (params.has('reset') || params.has('clear') || params.has('clean')) {
@@ -80,7 +80,7 @@
         <span class="brand-dot" id="liveDot"></span>
         <span class="brand-name">NOVA-X</span>
         <span class="brand-ver" id="fwVerHeader" title="ESP32 Running Firmware Version">ESP --</span>
-        <span class="comm-badge" id="commBadge" title="Protocol Link">OFF</span>
+        <span class="comm-badge offline" id="commBadge" title="Protocol Link">OFFLINE</span>
       </div>
 
       <!-- Quick Action Badges -->
@@ -278,6 +278,17 @@
 
         <div class="settings-scroll-area">
           
+          <!-- ESP32 Hardware Connection Link Card -->
+          <div class="config-block highlight-block" id="espConnCard">
+            <div class="block-title">ESP32 Hardware Connection</div>
+            <div class="stat-line"><span>Link Status:</span> <b id="connStatusStat" class="status-red">🔴 Disconnected</b></div>
+            <div class="stat-line"><span>Protocol:</span> <b id="connProtoStat">—</b></div>
+            <div class="stat-line"><span>Car Host:</span> <b id="connTargetStat">http://192.168.4.1</b></div>
+            <div class="pill-row mt-6">
+              <button id="pingCarBtn" class="pill-btn blue w-100">⚡ Test Connection to ESP32</button>
+            </div>
+          </div>
+
           <!-- Robot Host IP -->
           <div class="config-block">
             <label class="block-label">Robot Host Address</label>
@@ -341,6 +352,8 @@
 
             <!-- 1-Tap Cloud OTA Flash from GitHub -->
             <button id="cloudOtaBtn" class="pill-btn blue w-100 mt-8">☁️ Flash Firmware from GitHub</button>
+            <button id="downloadFwCacheBtn" class="pill-btn outline w-100 mt-4">📥 Pre-Download Firmware (for Offline Flashing)</button>
+            <div id="fwCacheStatus" class="sub-label mt-4" style="color:var(--color-teal);font-size:0.75rem;"></div>
             <div id="cloudOtaProgress" class="ota-msg-text" style="display:none;"></div>
 
             <!-- Manual File Fallback -->
@@ -359,7 +372,7 @@
   <!-- Dynamic In-App Hot JS Loader with Automatic Bundled Fallback -->
   <script>
     (function() {
-      var BUNDLE_VERSION = '2.4.25';
+      var BUNDLE_VERSION = '2.4.28';
       function _verGT(a, b) {
         var pa = (a||'').split('.').map(Number);
         var pb = (b||'').split('.').map(Number);
