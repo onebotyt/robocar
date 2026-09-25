@@ -24,7 +24,7 @@
   <script>
     (function() {
       // BUNDLE_VERSION must match CURRENT_APP_VERSION in app.js
-      var BUNDLE_VERSION = '2.4.32';
+      var BUNDLE_VERSION = '2.4.33';
       try {
         var params = new URLSearchParams(window.location.search);
         if (params.has('reset') || params.has('clear') || params.has('clean')) {
@@ -113,6 +113,20 @@
       </div>
     </div>
 
+    <!-- HTTPS MIXED CONTENT WARNING BANNER -->
+    <div id="httpsWarningBanner" class="update-banner https-warn-banner" style="display:none; background: linear-gradient(135deg, rgba(239, 68, 68, 0.25), rgba(185, 28, 28, 0.35)); border-color: #ef4444;">
+      <div class="update-banner-left">
+        <span class="update-icon">⚠️</span>
+        <div class="update-text-box">
+          <span class="update-title" style="color: #fca5a5;">HTTPS Mixed Content Warning</span>
+          <span class="update-desc" style="color: #fecaca;">Browsers block ESP32 (192.168.4.1) over HTTPS. Switch to HTTP or use Android APK.</span>
+        </div>
+      </div>
+      <div class="update-banner-right">
+        <button id="switchHttpBtn" class="btn-update-now" style="background:#ef4444;">SWITCH TO HTTP</button>
+      </div>
+    </div>
+
     <!-- MAIN 3-PANEL COCKPIT GRID -->
     <main class="cockpit-container">
 
@@ -185,7 +199,7 @@
             <img id="cam" alt="NovaX Camera Stream" class="cam-img">
             <div id="camStandby" class="cam-standby-overlay active">
               <div class="standby-reticle"></div>
-              <span>LIVE CAM STANDBY</span>
+              <span>CAMERA STANDBY</span>
             </div>
             <div class="cam-info-bar">
               <span>FPS: <b id="camFpsVal">0</b></span>
@@ -305,8 +319,8 @@
           <!-- Wi-Fi Management -->
           <div class="config-block">
             <div class="block-title">Wi-Fi Mode & Networks</div>
-            <div class="stat-line"><span>Mode:</span> <b id="wifiModeVal">AP</b></div>
-            <div class="stat-line"><span>IP:</span> <b id="wifiIpVal">192.168.4.1</b></div>
+            <div class="stat-line"><span>Mode:</span> <b id="wifiModeVal">— (Disconnected)</b></div>
+            <div class="stat-line"><span>IP:</span> <b id="wifiIpVal">—</b></div>
             
             <div class="pill-row mt-6">
               <button id="switchStaBtn" class="pill-btn">Switch to STA</button>
@@ -346,7 +360,7 @@
           <!-- Firmware OTA Update -->
           <div class="config-block">
             <div class="block-title">ESP32 Firmware OTA (Cloud & Local)</div>
-            <div class="stat-line"><span>Installed on ESP32:</span> <b id="fwVersionVal">v2.3.0</b></div>
+            <div class="stat-line"><span>Installed on ESP32:</span> <b id="fwVersionVal">— (Disconnected)</b></div>
             <div class="stat-line"><span>Latest on GitHub:</span> <b id="ghFwVersionVal" class="text-green">—</b></div>
             <input type="password" id="otaTokenInput" value="NovaX-OTA-ChangeMe" placeholder="OTA Token" class="mt-6">
 
@@ -372,7 +386,7 @@
   <!-- Dynamic In-App Hot JS Loader with Automatic Bundled Fallback -->
   <script>
     (function() {
-      var BUNDLE_VERSION = '2.4.32';
+      var BUNDLE_VERSION = '2.4.33';
       function _verGT(a, b) {
         var pa = (a||'').split('.').map(Number);
         var pb = (b||'').split('.').map(Number);

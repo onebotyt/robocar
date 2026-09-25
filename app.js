@@ -12,6 +12,7 @@ let wsConnected = false;
 let wsReconnectTimer = null;
 let wsPingTimer = null;
 let lastWsMessageTime = 0;
+let lastHttpSuccessTime = 0;
 
 let isDrawMode = false;
 let camOn = false;
@@ -109,6 +110,16 @@ function setConnectionState(online, proto = 'HTTP', isBootstrap = false) {
   const targetEl = $('connTargetStat');
   if (targetEl) {
     targetEl.textContent = base;
+  }
+
+  // Reset telemetry display values when disconnected so UI never shows false/stale data
+  if (!online) {
+    if ($('wifiModeVal')) $('wifiModeVal').textContent = '— (Disconnected)';
+    if ($('wifiIpVal')) $('wifiIpVal').textContent = '—';
+    if ($('fwVersionVal')) $('fwVersionVal').textContent = '— (Offline)';
+    if ($('fwVerHeader')) $('fwVerHeader').textContent = 'ESP --';
+    if ($('batteryStat')) $('batteryStat').textContent = '—';
+    if ($('radarDistVal')) $('radarDistVal').textContent = '--';
   }
 }
 
@@ -307,14 +318,15 @@ function initWebSocket() {
 
   ws.onerror = (err) => {
     console.warn('[NovaX-WS] Error encountered:', err);
+    wsConnected = false;
   };
 
   ws.onclose = () => {
     console.log('[NovaX-WS] Disconnected.');
     wsConnected = false;
     clearInterval(wsPingTimer);
-    // If HTTP was connected previously, downgrade indicator to HTTP fallback
-    if (isConnected) {
+    // ONLY remain in HTTP connected state if a REAL HTTP request succeeded in the last 2500ms
+    if (Date.now() - lastHttpSuccessTime < 2500) {
       setConnectionState(true, 'HTTP');
     } else {
       setConnectionState(false);
@@ -522,19 +534,30 @@ async function updateStatus() {
   if (wsConnected && (Date.now() - lastWsMessageTime > 3500)) {
     wsConnected = false;
     try { if (ws) ws.close(); } catch (e) {}
+    setConnectionState(false);
   }
 
   try {
     let data = null;
     try {
-      data = await jsonApi('/status', { timeout: 2500 });
+      data = await jsonApi('/status', { timeout: 2000 });
     } catch (e1) {
       try {
-        data = await jsonApi('/firmware', { timeout: 2500 });
+        data = await jsonApi('/firmware', { timeout: 2000 });
       } catch (e2) {
-        data = await jsonApi('/ota/status', { timeout: 2500 });
+        try {
+          data = await jsonApi('/ota/status', { timeout: 2000 });
+        } catch (e3) {
+          data = null;
+        }
       }
     }
+
+    if (!data) {
+      throw new Error('ESP32 not responding on HTTP');
+    }
+
+    lastHttpSuccessTime = Date.now();
 
     const isBootstrap = Boolean(
       data.status === 'bootstrap' ||
@@ -1090,10 +1113,16 @@ function applyHost(newHost) {
 }
 
 if ($('saveHostBtn')) {
-  $('saveHostBtn').onclick = () => {
+  $('saveHostBtn').onclick = async () => {
     vibrate(15);
     applyHost($('hostUrlInput').value);
-    alert(`Connected to ${base}`);
+    try {
+      const t0 = performance.now();
+      let res = await jsonApi('/status', { timeout: 2000 });
+      alert(`🟢 Reachable! ESP32 responded at ${base} in ${Math.round(performance.now() - t0)}ms.`);
+    } catch (e) {
+      alert(`⚠️ Saved host (${base}), but ESP32 is not responding.\n\nPlease check:\n1. Your phone/PC Wi-Fi is connected to "NovaX-Car"\n2. Car is powered ON and within range.`);
+    }
   };
 }
 
@@ -1564,6 +1593,18 @@ window.addEventListener('DOMContentLoaded', () => {
 
   const activeVer = localStorage.getItem('novax_hot_version') || CURRENT_APP_VERSION;
   if ($('installedAppVer')) $('installedAppVer').textContent = `v${activeVer}`;
+
+  // HTTPS Mixed Content Warning (Browsers block http://192.168.4.1 when loaded over https://)
+  if (window.location.protocol === 'https:' && window.location.hostname !== 'localhost') {
+    const banner = $('httpsWarningBanner');
+    if (banner) banner.style.display = 'flex';
+    const switchBtn = $('switchHttpBtn');
+    if (switchBtn) {
+      switchBtn.onclick = () => {
+        window.location.href = window.location.href.replace('https://', 'http://');
+      };
+    }
+  }
 
   // 1. Initialize Primary WebSocket connection (:81)
   initWebSocket();
