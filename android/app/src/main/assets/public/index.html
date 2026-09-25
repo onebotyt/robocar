@@ -127,6 +127,20 @@
       </div>
     </div>
 
+    <!-- ESP32 BOOTSTRAP / FIRMWARE FLASH BANNER -->
+    <div id="bootstrapOtaBanner" class="update-banner" style="display:none; background: linear-gradient(135deg, rgba(6, 182, 212, 0.25), rgba(2, 132, 199, 0.35)); border-color: #06b6d4;">
+      <div class="update-banner-left">
+        <span class="update-icon">⚡</span>
+        <div class="update-text-box">
+          <span class="update-title" style="color: #67e8f9;">ESP32 Firmware Flash Ready</span>
+          <span class="update-desc" id="bootstrapBannerDesc" style="color: #cffafe;">Pre-downloaded firmware is ready in phone memory.</span>
+        </div>
+      </div>
+      <div class="update-banner-right">
+        <button id="bannerFlashBtn" class="btn-update-now" style="background:#06b6d4;">FLASH NOW</button>
+      </div>
+    </div>
+
     <!-- MAIN 3-PANEL COCKPIT GRID -->
     <main class="cockpit-container">
 
@@ -364,10 +378,22 @@
             <div class="stat-line"><span>Latest on GitHub:</span> <b id="ghFwVersionVal" class="text-green">—</b></div>
             <input type="password" id="otaTokenInput" value="NovaX-OTA-ChangeMe" placeholder="OTA Token" class="mt-6">
 
-            <!-- 1-Tap Cloud OTA Flash from GitHub -->
-            <button id="cloudOtaBtn" class="pill-btn blue w-100 mt-8">☁️ Flash Firmware from GitHub</button>
-            <button id="downloadFwCacheBtn" class="pill-btn outline w-100 mt-4">📥 Pre-Download Firmware (for Offline Flashing)</button>
-            <div id="fwCacheStatus" class="sub-label mt-4" style="color:var(--color-teal);font-size:0.75rem;"></div>
+            <!-- OFFLINE CACHED FIRMWARE SECTION -->
+            <div class="config-block mt-6" style="background:rgba(6,182,212,0.06);border:1px solid rgba(6,182,212,0.3);padding:0.85rem;border-radius:0.6rem;">
+              <div class="sub-label" style="color:var(--color-teal);font-weight:700;font-size:0.85rem;">📦 Phone-Cached Firmware:</div>
+              <div id="fwCacheStatus" class="sub-label mt-2" style="font-size:0.8rem;">Checking cache...</div>
+              
+              <!-- 1-Tap Offline Flashing of Pre-Downloaded Firmware -->
+              <button id="flashCachedFwBtn" class="pill-btn blue w-100 mt-4" style="font-size:0.9rem;padding:0.7rem;font-weight:700;">⚡ Flash Pre-Downloaded Firmware to ESP32</button>
+              
+              <div class="pill-row mt-4">
+                <button id="downloadFwCacheBtn" class="pill-btn outline" style="font-size:0.75rem;">📥 Pre-Download (Internet)</button>
+                <button id="exportCachedFwBtn" class="pill-btn outline" style="font-size:0.75rem;">💾 Save .bin to Phone</button>
+              </div>
+            </div>
+
+            <!-- Direct Online Flash -->
+            <button id="cloudOtaBtn" class="pill-btn outline w-100 mt-6" style="font-size:0.8rem;">☁️ Flash Directly from GitHub</button>
             <div id="cloudOtaProgress" class="ota-msg-text" style="display:none;"></div>
 
             <!-- Manual File Fallback -->

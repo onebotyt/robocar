@@ -120,6 +120,16 @@ function setConnectionState(online, proto = 'HTTP', isBootstrap = false) {
     if ($('fwVerHeader')) $('fwVerHeader').textContent = 'ESP --';
     if ($('batteryStat')) $('batteryStat').textContent = '—';
     if ($('radarDistVal')) $('radarDistVal').textContent = '--';
+    if ($('bootstrapOtaBanner')) $('bootstrapOtaBanner').style.display = 'none';
+  } else if (isBootstrap) {
+    getFirmwareFromLocalCache().then((cached) => {
+      if (cached && cached.size >= 50000 && $('bootstrapOtaBanner')) {
+        $('bootstrapOtaBanner').style.display = 'flex';
+        if ($('bootstrapBannerDesc')) {
+          $('bootstrapBannerDesc').textContent = `Car is in Bootstrap Mode. Tap to flash cached firmware (${Math.round(cached.size / 1024)} KB)!`;
+        }
+      }
+    });
   }
 }
 
@@ -178,24 +188,44 @@ async function getFirmwareFromLocalCache() {
 
 async function updateCachedFwStatus() {
   const el = $('fwCacheStatus');
+  const flashBtn = $('flashCachedFwBtn');
+  const exportBtn = $('exportCachedFwBtn');
   if (!el) return;
   try {
-    const db = await openFwDb();
-    const tx = db.transaction('firmware', 'readonly');
-    const store = tx.objectStore('firmware');
-    const req = store.get('current_fw');
-    req.onsuccess = () => {
-      if (req.result && req.result.blob) {
-        const kb = Math.round(req.result.blob.size / 1024);
-        const dt = new Date(req.result.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        el.textContent = `💾 Saved on phone: ${kb} KB (${dt}) — ready for offline flash!`;
-      } else {
-        el.textContent = 'ℹ️ No firmware cached offline yet. Tap button above while on home Wi-Fi.';
-      }
-    };
+    const cached = await getFirmwareFromLocalCache();
+    if (cached && cached.size >= 50000) {
+      const kb = Math.round(cached.size / 1024);
+      el.innerHTML = `✅ <b>Ready:</b> ${kb} KB saved in phone memory. Ready to flash offline!`;
+      el.style.color = '#10b981';
+      if (flashBtn) flashBtn.disabled = false;
+      if (exportBtn) exportBtn.disabled = false;
+    } else {
+      el.textContent = 'ℹ️ No firmware cached offline yet. Tap "Pre-Download" while on internet.';
+      el.style.color = 'var(--text-dim)';
+      if (flashBtn) flashBtn.disabled = true;
+      if (exportBtn) exportBtn.disabled = true;
+    }
   } catch (e) {
     el.textContent = '';
   }
+}
+
+async function exportCachedFirmware() {
+  vibrate(20);
+  const cachedBlob = await getFirmwareFromLocalCache();
+  if (!cachedBlob || cachedBlob.size < 50000) {
+    alert('❌ No firmware binary found in phone cache.\nTap "📥 Pre-Download" first while on home Wi-Fi or mobile data.');
+    return;
+  }
+  const url = URL.createObjectURL(cachedBlob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'NovaX-Firmware.bin';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  alert(`💾 "NovaX-Firmware.bin" (${Math.round(cachedBlob.size / 1024)} KB) downloaded to your phone!\n\nYou can also open http://192.168.4.1 in your browser and upload this file directly.`);
 }
 
 async function preDownloadFirmware() {
@@ -210,7 +240,8 @@ async function preDownloadFirmware() {
     const blob = await res.blob();
     if (blob.size < 50000) throw new Error(`Binary too small (${blob.size} bytes)`);
     await saveFirmwareToLocalCache(blob, 'latest');
-    alert(`✅ Firmware downloaded and saved on your phone (${Math.round(blob.size / 1024)} KB)!\n\nYou can now connect to "NovaX-Car" Wi-Fi and flash anytime without internet.`);
+    updateCachedFwStatus();
+    alert(`✅ Firmware downloaded and saved on your phone (${Math.round(blob.size / 1024)} KB)!\n\nYou can now connect to "NovaX-Car" Wi-Fi and tap "⚡ Flash Pre-Downloaded Firmware" to upload it to the ESP32 without internet.`);
   } catch (err) {
     if (el) el.textContent = `❌ Download failed: ${err.message}`;
     alert(`Could not download firmware: ${err.message}\nMake sure your phone has internet (Wi-Fi or Mobile Data).`);
@@ -1118,6 +1149,7 @@ if ($('camSnapBtn')) {
 if ($('openSettingsModalBtn')) {
   $('openSettingsModalBtn').onclick = () => {
     if ($('settingsModal')) $('settingsModal').style.display = 'flex';
+    updateCachedFwStatus();
   };
 }
 
@@ -1265,7 +1297,114 @@ if ($('switchApBtn')) {
   };
 }
 
-// ================= ESP32 FIRMWARE OTA FLASH (REST) =================
+// ================= ESP32 FIRMWARE OTA FLASH (REST & MULTIPART) =================
+function uploadBinaryWithProgress(blob, targetPath, token, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const cleanBase = base.replace(/\/+$/, '');
+    const separator = targetPath.includes('?') ? '&' : '?';
+    const targetUrl = cleanBase + targetPath + (token ? `${separator}token=${encodeURIComponent(token)}` : '');
+    xhr.open('POST', targetUrl, true);
+    if (token) xhr.setRequestHeader('X-NovaX-OTA', token);
+    xhr.timeout = 120000;
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) {
+        const pct = Math.round((e.loaded / e.total) * 100);
+        onProgress(pct, e.loaded, e.total);
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(xhr.responseText);
+      } else {
+        reject(new Error(`HTTP ${xhr.status}: ${xhr.responseText || 'Upload rejected'}`));
+      }
+    };
+
+    xhr.onerror = () => reject(new Error('Network error connecting to car. Verify phone is connected to "NovaX-Car" Wi-Fi.'));
+    xhr.ontimeout = () => reject(new Error('Upload timed out after 120s.'));
+
+    // WebServer.h requires multipart/form-data for server.upload()
+    const formData = new FormData();
+    formData.append('firmware', blob, 'NovaX-Firmware.bin');
+    xhr.send(formData);
+  });
+}
+
+async function uploadFirmwareToCar(binBlob, token, msgEl) {
+  if (msgEl) {
+    msgEl.style.display = 'block';
+    msgEl.textContent = '1/3 Stopping car motors for safety...';
+  }
+  const bannerBtn = $('bannerFlashBtn');
+  const flashBtn = $('flashCachedFwBtn');
+  if (bannerBtn) bannerBtn.disabled = true;
+  if (flashBtn) flashBtn.disabled = true;
+
+  try { await stopCar(); } catch (e) {}
+
+  if (msgEl) msgEl.textContent = '2/3 Uploading firmware to ESP32...';
+
+  const updateProgress = (pct, l, t) => {
+    const text = `⚡ Flashing: ${pct}% (${Math.round(l/1024)} / ${Math.round(t/1024)} KB)... Do not turn off!`;
+    if (msgEl) msgEl.textContent = text;
+    if (bannerBtn) bannerBtn.textContent = `${pct}%`;
+    if (flashBtn) flashBtn.textContent = `⚡ Flashing ${pct}%...`;
+  };
+
+  let resText;
+  try {
+    resText = await uploadBinaryWithProgress(binBlob, '/ota/update', token, updateProgress);
+  } catch (e1) {
+    console.warn('/ota/update failed, attempting Bootstrap /update endpoint:', e1);
+    resText = await uploadBinaryWithProgress(binBlob, '/update', token, updateProgress);
+  }
+
+  if (msgEl) msgEl.textContent = '✅ Flashing complete! ESP32 restarting...';
+  if (bannerBtn) {
+    bannerBtn.textContent = 'RESTARTING...';
+    setTimeout(() => { if ($('bootstrapOtaBanner')) $('bootstrapOtaBanner').style.display = 'none'; }, 6000);
+  }
+  if (flashBtn) {
+    flashBtn.disabled = false;
+    flashBtn.textContent = '⚡ Flash Pre-Downloaded Firmware to ESP32';
+  }
+  return resText;
+}
+
+// 1-Tap Offline Flashing of Phone-Cached Firmware
+async function flashCachedFirmware() {
+  vibrate(30);
+  if ($('settingsModal')) $('settingsModal').style.display = 'flex';
+
+  const msg = $('cloudOtaProgress') || $('fwMsg');
+  const cachedBlob = await getFirmwareFromLocalCache();
+  if (!cachedBlob || cachedBlob.size < 50000) {
+    alert('❌ No firmware binary found in phone cache.\n\nPlease connect your phone to home Wi-Fi or mobile data first, and tap "📥 Pre-Download" to save it.');
+    return;
+  }
+
+  const kb = Math.round(cachedBlob.size / 1024);
+  if (!confirm(`Flash pre-downloaded firmware (${kb} KB) to ESP32?\n\nMake sure your phone Wi-Fi is connected to "NovaX-Car".\nCar motors will stop safely.`)) return;
+
+  const token = $('otaTokenInput')?.value.trim() || 'NovaX-OTA-ChangeMe';
+  try {
+    await uploadFirmwareToCar(cachedBlob, token, msg);
+    alert('🎉 ESP32 Firmware Flashed Successfully!\n\nYour car is rebooting now into NovaX V2. Reconnect Wi-Fi to "NovaX-Car" in 10 seconds.');
+  } catch (err) {
+    console.error('Cached flash error:', err);
+    if (msg) msg.textContent = `❌ Flash Failed: ${err.message}`;
+    if ($('flashCachedFwBtn')) $('flashCachedFwBtn').disabled = false;
+    if ($('bannerFlashBtn')) {
+      $('bannerFlashBtn').disabled = false;
+      $('bannerFlashBtn').textContent = 'RETRY FLASH';
+    }
+    alert(`Flashing Error: ${err.message}\n\nPlease check:\n1. Your phone Wi-Fi is connected to "NovaX-Car"\n2. Car is powered ON`);
+  }
+}
+
 if ($('fwUpdateBtn')) {
   $('fwUpdateBtn').onclick = async () => {
     vibrate(35);
@@ -1277,20 +1416,9 @@ if ($('fwUpdateBtn')) {
     const token = $('otaTokenInput')?.value.trim() || 'NovaX-OTA-ChangeMe';
     if (!confirm(`Flash "${file.name}" to ESP32?\nAll motors will be safely stopped during update.`)) return;
 
-    const msg = $('fwMsg');
-    if (msg) msg.textContent = 'Uploading firmware... Robot stopped.';
+    const msg = $('fwMsg') || $('cloudOtaProgress');
     try {
-      const res = await api('/ota/update', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/octet-stream',
-          'X-NovaX-OTA': token
-        },
-        body: file,
-        timeout: 90000
-      });
-      if (!res.ok) throw new Error(await res.text());
-      if (msg) msg.textContent = 'Upload successful! ESP32 restarting in AP mode...';
+      await uploadFirmwareToCar(file, token, msg);
       alert('Firmware flashed successfully! ESP32 is rebooting.');
     } catch (err) {
       if (msg) msg.textContent = `OTA Error: ${err.message}`;
@@ -1308,21 +1436,6 @@ async function flashCloudOta() {
     msg.textContent = '1/4 Verifying connection to NovaX car...';
   }
 
-  // Ensure robot is reachable
-  try {
-    try {
-      await api('/status', { timeout: 2500 });
-    } catch (e1) {
-      await api('/firmware', { timeout: 2500 });
-    }
-  } catch (e) {
-    const proceed = confirm(`Car not responding at ${base}.\nEnsure your phone is connected to "NovaX-Car" Wi-Fi.\nProceed anyway?`);
-    if (!proceed) {
-      if (msg) msg.style.display = 'none';
-      return;
-    }
-  }
-
   const { repo, branch } = getGitHubConfig();
   const token = $('otaTokenInput')?.value.trim() || 'NovaX-OTA-ChangeMe';
 
@@ -1332,30 +1445,27 @@ async function flashCloudOta() {
   }
 
   try {
-    // Step 1: Safety stop
-    if (msg) msg.textContent = '2/4 Stopping car motors for safety...';
-    try { await stopCar(); } catch (e) {}
-
-    // Step 2: Acquire binary (Try direct GitHub download, fallback to local IndexedDB cache)
-    if (msg) msg.textContent = `3/4 Acquiring firmware binary...`;
+    if (msg) msg.textContent = '2/4 Acquiring firmware binary...';
     let binBlob = null;
     let fromCache = false;
 
-    // A. Try direct download from GitHub
-    try {
-      const binUrl = `https://raw.githubusercontent.com/${repo}/${branch}/firmware/NovaX-Firmware.bin?t=${Date.now()}`;
-      const binRes = await fetch(binUrl, { cache: 'no-store' });
-      if (binRes.ok) {
-        binBlob = await binRes.blob();
-        if (binBlob && binBlob.size >= 50000) {
-          saveFirmwareToLocalCache(binBlob, 'latest').catch(() => {});
+    // A. Try direct download from GitHub if online
+    if (navigator.onLine) {
+      try {
+        const binUrl = `https://raw.githubusercontent.com/${repo}/${branch}/firmware/NovaX-Firmware.bin?t=${Date.now()}`;
+        const binRes = await fetch(binUrl, { cache: 'no-store' });
+        if (binRes.ok) {
+          binBlob = await binRes.blob();
+          if (binBlob && binBlob.size >= 50000) {
+            saveFirmwareToLocalCache(binBlob, 'latest').catch(() => {});
+          }
         }
+      } catch (netErr) {
+        console.warn('[NovaX] Direct GitHub fetch failed:', netErr);
       }
-    } catch (netErr) {
-      console.warn('[NovaX] Direct GitHub fetch failed (expected if phone is connected to offline car Wi-Fi):', netErr);
     }
 
-    // B. If GitHub fetch failed, try offline cached firmware in IndexedDB
+    // B. Fallback to cached firmware
     if (!binBlob || binBlob.size < 50000) {
       const cached = await getFirmwareFromLocalCache();
       if (cached && cached.size >= 50000) {
@@ -1364,56 +1474,17 @@ async function flashCloudOta() {
       }
     }
 
-    // C. If still no firmware binary available, explain clearly to the user
     if (!binBlob || binBlob.size < 50000) {
       throw new Error(
         `Cannot reach GitHub! Your phone is connected to "NovaX-Car" Wi-Fi, which does not have internet access.\n\n` +
         `HOW TO FIX:\n` +
-        `1. Switch your phone Wi-Fi to your Home Wi-Fi or Mobile Data for a moment.\n` +
-        `2. Tap "📥 Pre-Download Firmware" in Settings to save it onto your phone.\n` +
-        `3. Reconnect your phone to "NovaX-Car" and tap "Flash Firmware from GitHub"!\n\n` +
-        `Alternatively: Download NovaX-Firmware.bin in your browser and upload it below.`
+        `1. Switch to Home Wi-Fi or Mobile Data.\n` +
+        `2. Tap "📥 Pre-Download" in Settings to save it onto your phone.\n` +
+        `3. Reconnect to "NovaX-Car" and tap "⚡ Flash Pre-Downloaded Firmware"!`
       );
     }
 
-    // Step 3: Flash to ESP32
-    const kb = Math.round(binBlob.size / 1024);
-    if (msg) {
-      msg.textContent = fromCache
-        ? `4/4 Flashing ${kb} KB (from phone cache) to ESP32... Do not power off!`
-        : `4/4 Flashing ${kb} KB to ESP32... Do not power off!`;
-    }
-
-    // Try /ota/update, fallback to /update
-    let uploadRes;
-    try {
-      uploadRes = await api('/ota/update', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/octet-stream',
-          'X-NovaX-OTA': token
-        },
-        body: binBlob,
-        timeout: 120000
-      });
-    } catch (otaErr) {
-      uploadRes = await api('/update', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/octet-stream',
-          'X-NovaX-OTA': token
-        },
-        body: binBlob,
-        timeout: 120000
-      });
-    }
-
-    if (!uploadRes.ok) {
-      const errText = await uploadRes.text();
-      throw new Error(errText || `HTTP ${uploadRes.status}`);
-    }
-
-    if (msg) msg.textContent = '✅ Firmware flashed successfully! ESP32 restarting...';
+    await uploadFirmwareToCar(binBlob, token, msg);
     alert('🎉 ESP32 Firmware flashed successfully!\nNovaX is rebooting now into the full robot car firmware.');
   } catch (err) {
     console.error('Cloud OTA Error:', err);
@@ -1580,6 +1651,9 @@ if ($('forceUpdateBtn')) $('forceUpdateBtn').onclick = () => hotUpdateApp(true);
 if ($('factoryResetAppBtn')) $('factoryResetAppBtn').onclick = factoryResetApp;
 if ($('cloudOtaBtn')) $('cloudOtaBtn').onclick = flashCloudOta;
 if ($('downloadFwCacheBtn')) $('downloadFwCacheBtn').onclick = preDownloadFirmware;
+if ($('flashCachedFwBtn')) $('flashCachedFwBtn').onclick = flashCachedFirmware;
+if ($('exportCachedFwBtn')) $('exportCachedFwBtn').onclick = exportCachedFirmware;
+if ($('bannerFlashBtn')) $('bannerFlashBtn').onclick = flashCachedFirmware;
 if ($('pingCarBtn')) $('pingCarBtn').onclick = pingCar;
 
 if ($('downloadApkBtn')) {

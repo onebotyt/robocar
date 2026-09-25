@@ -862,7 +862,7 @@ void updateLEDs() {
 void setCorsHeaders() {
   restServer.sendHeader("Access-Control-Allow-Origin",  "*");
   restServer.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  restServer.sendHeader("Access-Control-Allow-Headers", "Content-Type,X-NovaX-OTA");
+  restServer.sendHeader("Access-Control-Allow-Headers", "*");
 }
 // [A15] Constant-time-ish token comparison (avoids early-exit timing leak)
 bool safeTokenCmp(const String& a, const String& b) {
@@ -872,8 +872,15 @@ bool safeTokenCmp(const String& a, const String& b) {
   return diff == 0;
 }
 bool isOtaAuthorized() {
-  return restServer.hasHeader("X-NovaX-OTA") &&
-         safeTokenCmp(restServer.header("X-NovaX-OTA"), String(OTA_DEFAULT_TOKEN));
+  if (restServer.hasHeader("X-NovaX-OTA") &&
+      safeTokenCmp(restServer.header("X-NovaX-OTA"), String(OTA_DEFAULT_TOKEN))) {
+    return true;
+  }
+  if (restServer.hasArg("token") &&
+      safeTokenCmp(restServer.arg("token"), String(OTA_DEFAULT_TOKEN))) {
+    return true;
+  }
+  return false;
 }
 String getWifiProfilesJson() {
   String   json  = "{\"selected\":" + String(activeWifiIndex) + ",\"networks\":[";
@@ -1156,6 +1163,7 @@ void setup() {
   restServer.on("/cam.jpg",        HTTP_GET,  handleCameraSnapshot);
   restServer.on("/ota/status",     HTTP_GET,  handleFirmwareInfo);
   restServer.on("/ota/update",     HTTP_POST, handleOtaFinish, handleOtaUpload);
+  restServer.on("/update",         HTTP_POST, handleOtaFinish, handleOtaUpload);
   // Backward-compat REST move/rotate/led/scan/stop/start/mode endpoints
   restServer.on("/servo", HTTP_GET, []() {
     setCorsHeaders();
