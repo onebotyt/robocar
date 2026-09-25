@@ -130,7 +130,7 @@ jobs:
           mkdir -p build-sketch/NovaX_V2
           cp esp32/NovaX_V2.ino build-sketch/NovaX_V2/NovaX_V2.ino
           cp esp32/OV7670_NonFIFO.h build-sketch/NovaX_V2/OV7670_NonFIFO.h
-          arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs --output-dir firmware/ build-sketch/NovaX_V2
+          arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs --output-dir firmware/ build-sketch/NovaX_V2 2>&1 | tee compile_output.log || true
           BIN_FILE=$(find firmware/ -type f -name "*NovaX_V2*.bin" ! -name "*.partitions.bin" ! -name "*.bootloader.bin" | head -n 1)
           if [ -z "$BIN_FILE" ]; then
             BIN_FILE=$(find firmware/ -type f -name "*.bin" ! -name "*.partitions.bin" ! -name "*.bootloader.bin" | head -n 1)
@@ -141,7 +141,8 @@ jobs:
             cp "$BIN_FILE" build-output/NovaX-Firmware.bin
             echo "ESP32 Firmware binary compiled successfully."
           else
-            echo "::error::No binary file found after compilation!"
+            echo "::error::Compilation failed or no binary file found!"
+            tail -n 150 compile_output.log
             exit 1
           fi
 

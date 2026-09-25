@@ -18,6 +18,7 @@
 #include "esp_intr_alloc.h"
 #include "driver/periph_ctrl.h"
 #include "esp32-hal-ledc.h"
+#include "rom/gpio.h"
 
 #pragma once
 
@@ -594,7 +595,7 @@ static inline void i2s_conf_reset()
 static void i2s_init()
 {
 	// Configure input GPIOs
-	gpio_num_t pins[] = {
+	int pins[] = {
 		s_config.D0,
 		s_config.D1,
 		s_config.D2,
@@ -616,28 +617,28 @@ static void i2s_init()
 	};
 
 	for (int i = 0; i < 10; ++i) {
-		conf.pin_bit_mask = 1LL << pins[i];
+		conf.pin_bit_mask = 1ULL << pins[i];
 		gpio_config(&conf);
 	}
 
 	// VSYNC Interrupt Enable
-	gpio_set_intr_type( s_config.VSYNC, GPIO_INTR_NEGEDGE );
+	gpio_set_intr_type( (gpio_num_t)s_config.VSYNC, GPIO_INTR_NEGEDGE );
 	gpio_install_isr_service( 0 );
-	gpio_isr_handler_add( s_config.VSYNC, VSYNC_isr, (void*)s_config.VSYNC );
+	gpio_isr_handler_add( (gpio_num_t)s_config.VSYNC, VSYNC_isr, (void*)(intptr_t)s_config.VSYNC );
 
 	// Route input GPIOs to I2S peripheral using GPIO matrix
-	gpio_matrix_in(s_config.D0,		I2S0I_DATA_IN0_IDX, false);
-	gpio_matrix_in(s_config.D1,		I2S0I_DATA_IN1_IDX, false);
-	gpio_matrix_in(s_config.D2,		I2S0I_DATA_IN2_IDX, false);
-	gpio_matrix_in(s_config.D3,		I2S0I_DATA_IN3_IDX, false);
-	gpio_matrix_in(s_config.D4,		I2S0I_DATA_IN4_IDX, false);
-	gpio_matrix_in(s_config.D5,		I2S0I_DATA_IN5_IDX, false);
-	gpio_matrix_in(s_config.D6,		I2S0I_DATA_IN6_IDX, false);
-	gpio_matrix_in(s_config.D7,		I2S0I_DATA_IN7_IDX, false);
-	gpio_matrix_in(s_config.VSYNC,	I2S0I_V_SYNC_IDX,	false);		// VSYNC は　ネガティブ　にしておくこと
-	gpio_matrix_in(0x38,			I2S0I_H_SYNC_IDX,	false);		// 0x38 is Allways hight (0x30 is Allways low)
-	gpio_matrix_in(0x38,			I2S0I_H_ENABLE_IDX, false);		// HREF は　見ない
-	gpio_matrix_in(s_config.PCLK,	I2S0I_WS_IN_IDX,	false);		// PCLK は　HREF が　ON　の時のみ有効にすること
+	gpio_matrix_in((gpio_num_t)s_config.D0,		I2S0I_DATA_IN0_IDX, false);
+	gpio_matrix_in((gpio_num_t)s_config.D1,		I2S0I_DATA_IN1_IDX, false);
+	gpio_matrix_in((gpio_num_t)s_config.D2,		I2S0I_DATA_IN2_IDX, false);
+	gpio_matrix_in((gpio_num_t)s_config.D3,		I2S0I_DATA_IN3_IDX, false);
+	gpio_matrix_in((gpio_num_t)s_config.D4,		I2S0I_DATA_IN4_IDX, false);
+	gpio_matrix_in((gpio_num_t)s_config.D5,		I2S0I_DATA_IN5_IDX, false);
+	gpio_matrix_in((gpio_num_t)s_config.D6,		I2S0I_DATA_IN6_IDX, false);
+	gpio_matrix_in((gpio_num_t)s_config.D7,		I2S0I_DATA_IN7_IDX, false);
+	gpio_matrix_in((gpio_num_t)s_config.VSYNC,	I2S0I_V_SYNC_IDX,	false);
+	gpio_matrix_in(0x38,			I2S0I_H_SYNC_IDX,	false);
+	gpio_matrix_in(0x38,			I2S0I_H_ENABLE_IDX, false);
+	gpio_matrix_in((gpio_num_t)s_config.PCLK,	I2S0I_WS_IN_IDX,	false);
 
 	// Enable and configure I2S peripheral
 	periph_module_enable(PERIPH_I2S0_MODULE);	// I2S0 enable
