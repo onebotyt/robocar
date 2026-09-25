@@ -1,0 +1,22 @@
+In file included from /home/runner/work/robocar/robocar/build-sketch/NovaX_V2/NovaX_V2.ino:70:
+/home/runner/work/robocar/robocar/build-sketch/NovaX_V2/OV7670_NonFIFO.h:1: error: unterminated #ifndef
+ #ifndef OV7670_NONFIFO_H
+ 
+
+[92mUsed library[0m            [92mVersion[0m [90mPath[0m
+[93mWiFi[0m                    2.0.0   [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/2.0.14/libraries/WiFi[0m
+[93mWebServer[0m               2.0.0   [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/2.0.14/libraries/WebServer[0m
+[93mESP32Servo[0m              3.2.1   [90m/home/runner/Arduino/libraries/ESP32Servo[0m
+[93mWire[0m                    2.0.0   [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/2.0.14/libraries/Wire[0m
+[93mAdafruit MPU6050[0m        2.2.9   [90m/home/runner/Arduino/libraries/Adafruit_MPU6050[0m
+[93mAdafruit BusIO[0m          1.17.4  [90m/home/runner/Arduino/libraries/Adafruit_BusIO[0m
+[93mSPI[0m                     2.0.0   [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/2.0.14/libraries/SPI[0m
+[93mAdafruit Unified Sensor[0m 1.1.15  [90m/home/runner/Arduino/libraries/Adafruit_Unified_Sensor[0m
+[93mPreferences[0m             2.0.0   [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/2.0.14/libraries/Preferences[0m
+[93mESPmDNS[0m                 2.0.0   [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/2.0.14/libraries/ESPmDNS[0m
+[93mUpdate[0m                  2.0.0   [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/2.0.14/libraries/Update[0m
+[93mFS[0m                      2.0.0   [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/2.0.14/libraries/FS[0m
+
+[92mUsed platform[0m [92mVersion[0m [90mPath[0m
+[93mesp32:esp32[0m   2.0.14  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/2.0.14[0m
+Error during build: exit status 1
