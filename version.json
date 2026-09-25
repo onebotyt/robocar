@@ -1,10 +1,10 @@
 {
-  "version": "2.4.37",
-  "buildCode": 37,
+  "version": "2.4.38",
+  "buildCode": 38,
   "buildDate": "2026-09-25",
   "changelog": "NovaX V2.4.37: 1-Tap offline flashing for pre-downloaded firmware, instant offline detection, and Bootstrap OTA cockpit banner.",
   "firmware": {
-    "version": "2.4.37",
+    "version": "2.4.38",
     "binUrl": "https://raw.githubusercontent.com/onebotyt/robocar/main/firmware/NovaX-Firmware.bin",
     "releaseDate": "2026-09-25",
     "changelog": "ESP32 V2.4.37: Added /update OTA alias, query parameter token support, and wildcard CORS headers."
