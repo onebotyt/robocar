@@ -903,6 +903,7 @@ bool safeTokenCmp(const String& a, const String& b) {
   return diff == 0;
 }
 bool isOtaAuthorized() {
+  if (WiFi.getMode() == WIFI_AP) return true; // Always permit flashing in AP mode
   if (restServer.hasHeader("X-NovaX-OTA") &&
       safeTokenCmp(restServer.header("X-NovaX-OTA"), String(OTA_DEFAULT_TOKEN))) {
     return true;
@@ -1095,6 +1096,233 @@ void handleStatus() {
   s += "}";
   restServer.send(200, "application/json", s);
 }
+
+// ===================================================================================
+// EMBEDDED OTA FLASHER WEB PAGE (FOR BROWSER ACCESS AT 192.168.4.1)
+// ===================================================================================
+static const char INDEX_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NovaX V2 Control & OTA</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card: #131b2e;
+      --border: #1f2d4a;
+      --cyan: #06b6d4;
+      --cyan-glow: rgba(6, 182, 212, 0.4);
+      --green: #10b981;
+      --red: #ef4444;
+      --text: #f1f5f9;
+      --subtext: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 1rem;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 1rem;
+      max-width: 480px;
+      width: 100%;
+      padding: 2rem;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), 0 0 20px var(--cyan-glow);
+    }
+    .badge {
+      display: inline-block;
+      padding: 0.25rem 0.75rem;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      background: rgba(6, 182, 212, 0.15);
+      color: var(--cyan);
+      border: 1px solid var(--cyan);
+      margin-bottom: 0.75rem;
+    }
+    h1 { font-size: 1.5rem; font-weight: 800; margin-bottom: 0.5rem; letter-spacing: -0.02em; }
+    p { font-size: 0.875rem; color: var(--subtext); line-height: 1.5; margin-bottom: 1.5rem; }
+    .dropzone {
+      border: 2px dashed var(--border);
+      border-radius: 0.75rem;
+      padding: 1.5rem;
+      text-align: center;
+      margin-bottom: 1.5rem;
+      cursor: pointer;
+      transition: all 0.2s;
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .dropzone:hover { border-color: var(--cyan); background: rgba(6, 182, 212, 0.05); }
+    input[type="file"] { display: none; }
+    .file-label { font-size: 0.875rem; color: var(--cyan); font-weight: 600; cursor: pointer; }
+    .filename { font-size: 0.8rem; color: var(--text); margin-top: 0.5rem; word-break: break-all; }
+    button {
+      width: 100%;
+      padding: 0.875rem;
+      background: linear-gradient(135deg, #06b6d4, #0284c7);
+      color: #fff;
+      border: none;
+      border-radius: 0.75rem;
+      font-size: 0.95rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s;
+      box-shadow: 0 4px 15px rgba(6, 182, 212, 0.3);
+    }
+    button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(6, 182, 212, 0.5); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .progress-box { margin-top: 1.5rem; display: none; }
+    .progress-bar-bg {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 9999px;
+      height: 10px;
+      overflow: hidden;
+      margin-bottom: 0.5rem;
+    }
+    .progress-fill {
+      background: linear-gradient(90deg, #06b6d4, #10b981);
+      width: 0%;
+      height: 100%;
+      transition: width 0.15s ease-out;
+    }
+    .status-text { font-size: 0.8rem; color: var(--subtext); text-align: center; }
+    .alert {
+      margin-top: 1.25rem;
+      padding: 0.75rem 1rem;
+      border-radius: 0.5rem;
+      font-size: 0.825rem;
+      display: none;
+    }
+    .alert.success { background: rgba(16, 185, 129, 0.15); border: 1px solid var(--green); color: #6ee7b7; display: block; }
+    .alert.error { background: rgba(239, 68, 68, 0.15); border: 1px solid var(--red); color: #fca5a5; display: block; }
+    .nav-links { display: flex; gap: 0.5rem; margin-top: 1.5rem; }
+    .nav-btn {
+      flex: 1;
+      padding: 0.6rem;
+      text-align: center;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      color: var(--cyan);
+      text-decoration: none;
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+    .nav-btn:hover { background: rgba(6, 182, 212, 0.1); border-color: var(--cyan); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <span class="badge">NovaX V2 Online</span>
+    <h1>NovaX Firmware Flasher</h1>
+    <p>Select <b>NovaX-Firmware.bin</b> to flash wirelessly into the car over Wi-Fi.</p>
+
+    <div class="dropzone" onclick="document.getElementById('fwInput').click()">
+      <div style="font-size: 2rem; margin-bottom: 0.5rem;">⚡</div>
+      <div class="file-label">Choose Firmware Binary (.bin)</div>
+      <div class="filename" id="fileChosen">No file chosen</div>
+      <input type="file" id="fwInput" accept=".bin">
+    </div>
+
+    <button id="flashBtn" disabled onclick="uploadFirmware()">Flash Firmware Now</button>
+
+    <div class="progress-box" id="progressBox">
+      <div class="progress-bar-bg">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+      <div class="status-text" id="statusText">0% Uploaded</div>
+    </div>
+
+    <div class="alert" id="alertBox"></div>
+
+    <div class="nav-links">
+      <a href="/status" class="nav-btn" target="_blank">📊 Status JSON</a>
+      <a href="/cam.jpg" class="nav-btn" target="_blank">📷 Camera</a>
+      <a href="/firmware" class="nav-btn" target="_blank">ℹ️ Firmware</a>
+    </div>
+  </div>
+
+  <script>
+    const fwInput = document.getElementById('fwInput');
+    const fileChosen = document.getElementById('fileChosen');
+    const flashBtn = document.getElementById('flashBtn');
+    const progressBox = document.getElementById('progressBox');
+    const progressFill = document.getElementById('progressFill');
+    const statusText = document.getElementById('statusText');
+    const alertBox = document.getElementById('alertBox');
+
+    fwInput.onchange = () => {
+      if (fwInput.files.length > 0) {
+        const file = fwInput.files[0];
+        fileChosen.textContent = `${file.name} (${Math.round(file.size / 1024)} KB)`;
+        flashBtn.disabled = false;
+      } else {
+        fileChosen.textContent = 'No file chosen';
+        flashBtn.disabled = true;
+      }
+    };
+
+    function uploadFirmware() {
+      if (!fwInput.files.length) return;
+      const file = fwInput.files[0];
+      flashBtn.disabled = true;
+      progressBox.style.display = 'block';
+      alertBox.className = 'alert';
+      alertBox.style.display = 'none';
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/update', true);
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const percent = Math.round((e.loaded / e.total) * 100);
+          progressFill.style.width = percent + '%';
+          statusText.textContent = `Uploading: ${percent}% (${Math.round(e.loaded / 1024)} / ${Math.round(e.total / 1024)} KB)`;
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status === 200) {
+          progressFill.style.width = '100%';
+          statusText.textContent = 'Flashing Complete! Rebooting car...';
+          alertBox.className = 'alert success';
+          alertBox.innerHTML = '<b>Update Successful!</b><br>ESP32 is rebooting. Reconnect to NovaX-Car in 10 seconds.';
+          alertBox.style.display = 'block';
+        } else {
+          alertBox.className = 'alert error';
+          alertBox.textContent = 'Flashing failed! Server returned status ' + xhr.status + ': ' + xhr.responseText;
+          alertBox.style.display = 'block';
+          flashBtn.disabled = false;
+        }
+      };
+
+      xhr.onerror = () => {
+        alertBox.className = 'alert error';
+        alertBox.textContent = 'Network error during upload. Please verify Wi-Fi connection.';
+        alertBox.style.display = 'block';
+        flashBtn.disabled = false;
+      };
+
+      const formData = new FormData();
+      formData.append('firmware', file);
+      xhr.send(formData);
+    }
+  </script>
+</body>
+</html>
+)rawliteral";
+
 // [A16] OTA: capture auth flag at UPLOAD_FILE_START only
 void handleOtaUpload() {
   HTTPUpload& upload = restServer.upload();
@@ -1180,7 +1408,15 @@ void setup() {
   MDNS.begin("novax");
   Serial.printf("[WIFI] AP Mode | SSID: %s | IP: %s\n",
                 AP_DEFAULT_SSID, WiFi.softAPIP().toString().c_str());
-  // Register REST endpoints
+  // Register REST & Web Flasher endpoints
+  restServer.on("/", HTTP_GET, []() {
+    setCorsHeaders();
+    restServer.send_P(200, "text/html", INDEX_HTML);
+  });
+  restServer.on("/update", HTTP_GET, []() {
+    setCorsHeaders();
+    restServer.send_P(200, "text/html", INDEX_HTML);
+  });
   restServer.on("/wifi/scan",      HTTP_GET,  handleWifiScan);
   restServer.on("/wifi/saved",     HTTP_GET,  handleWifiSaved);
   restServer.on("/wifi/save",      HTTP_POST, handleWifiSave);
