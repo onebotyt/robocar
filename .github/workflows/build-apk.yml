@@ -146,6 +146,18 @@ jobs:
             exit 1
           fi
 
+      - name: Commit Compilation Error Log (on failure)
+        if: failure()
+        run: |
+          if [ -f compile_output.log ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            cp compile_output.log esp32_compile_error.log
+            git add -f esp32_compile_error.log
+            git commit -m "ci: capture compiler error log [skip ci]" || true
+            git push origin main || true
+          fi
+
       - name: Upload Debug APK & Firmware Artifacts
         uses: actions/upload-artifact@v4
         with:
