@@ -580,6 +580,7 @@ async function updateStatus() {
       const ver = data.version || data.firmware;
       if ($('fwVersionVal')) $('fwVersionVal').textContent = `v${ver}`;
       if ($('fwVerHeader')) $('fwVerHeader').textContent = `ESP v${ver}`;
+    }
   } catch (err) {
     if (!wsConnected || (Date.now() - lastWsMessageTime > 3000)) {
       wsConnected = false;
@@ -1363,7 +1364,7 @@ async function flashCloudOta() {
 }
 
 // ================= GITHUB APP UPDATER (WITH INTEGRITY CHECK & ROLLBACK) =================
-const CURRENT_APP_VERSION = '2.4.30';
+const CURRENT_APP_VERSION = '2.4.32';
 
 function getGitHubConfig() {
   const repo = $('ghRepoInput')?.value.trim() || localStorage.getItem('novax_gh_repo') || 'onebotyt/robocar';
