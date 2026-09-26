@@ -317,13 +317,13 @@ function initWebSocket() {
     lastWsMessageTime = Date.now();
     setConnectionState(true, 'WS');
 
-    // Start keepalive heartbeat ping every 1000ms with fast 1800ms silence detection
+    // Start keepalive heartbeat ping every 1000ms with reliable 4000ms silence detection
     clearInterval(wsPingTimer);
     wsPingTimer = setInterval(() => {
       if (wsConnected) {
-        // If ESP32 has been silent for > 1800ms (e.g. power disconnected):
-        if (Date.now() - lastWsMessageTime > 1800) {
-          console.warn('[NovaX-WS] Ping timeout: ESP32 silent for >1.8s (power cut). Forcing disconnect.');
+        // If ESP32 has been silent for > 4000ms (e.g. power disconnected):
+        if (Date.now() - lastWsMessageTime > 4000) {
+          console.warn('[NovaX-WS] Ping timeout: ESP32 silent for >4s (power cut). Forcing disconnect.');
           wsConnected = false;
           try { ws.close(); } catch (e) {}
           setConnectionState(false);
@@ -1079,8 +1079,7 @@ function fetchCamFrame() {
   const img = $('cam');
   if (!img) return;
   const tempImg = new Image();
-  const endpoint = preferBmp ? '/cam.bmp' : '/cam.jpg';
-  const frameUrl = `${base}${endpoint}?t=${Date.now()}`;
+  const frameUrl = `${base}/cam.jpg?t=${Date.now()}`;
 
   tempImg.onload = () => {
     if (!camOn) return;
@@ -1094,14 +1093,13 @@ function fetchCamFrame() {
       camFrameCount = 0;
       lastFpsTime = now;
     }
-    if (camOn) camTimer = setTimeout(fetchCamFrame, 150);
+    // High-speed 50ms pacing delivers fluid 12-18 FPS
+    if (camOn) camTimer = setTimeout(fetchCamFrame, 50);
   };
 
   tempImg.onerror = () => {
     if (!camOn) return;
-    // Automatic fallback between JPG and raw BMP stream
-    preferBmp = !preferBmp;
-    if (camOn) camTimer = setTimeout(fetchCamFrame, 400);
+    if (camOn) camTimer = setTimeout(fetchCamFrame, 300);
   };
 
   tempImg.src = frameUrl;

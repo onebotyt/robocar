@@ -210,6 +210,7 @@ void updateLEDs();
 void stepAutoNav();
 void updateGyroHeading();
 void stepNonBlockingRotate();
+void pollWebSocketServer();
 // ===================================================================================
 // 4. LOW-LEVEL HARDWARE DRIVERS
 // ===================================================================================
@@ -454,11 +455,13 @@ void handleCameraBmp() {
     restServer.send(503, "text/plain", "Camera unavailable");
     return;
   }
+  pollWebSocketServer();
   if (!nonFifoCam.getFrame(rawFrameBuffer)) {
     Serial.println("[CAMERA] getFrame failed");
     restServer.send(503, "text/plain", "Frame acquisition failed");
     return;
   }
+  pollWebSocketServer();
   size_t total = sizeof(BMP_HEADER_QQVGA_RGB565) + sizeof(rawFrameBuffer);
   WiFiClient client = restServer.client();
   client.print("HTTP/1.1 200 OK\r\n"
@@ -469,6 +472,7 @@ void handleCameraBmp() {
                "Connection: close\r\n\r\n");
   client.write(BMP_HEADER_QQVGA_RGB565, sizeof(BMP_HEADER_QQVGA_RGB565));
   client.write(rawFrameBuffer, sizeof(rawFrameBuffer));
+  pollWebSocketServer();
 }
 
 void handleCameraSnapshot() {
@@ -476,15 +480,17 @@ void handleCameraSnapshot() {
     restServer.send(503, "text/plain", "Camera unavailable");
     return;
   }
+  pollWebSocketServer();
   if (!nonFifoCam.getFrame(rawFrameBuffer)) {
     Serial.println("[CAMERA] getFrame failed");
     restServer.send(503, "text/plain", "Frame acquisition failed");
     return;
   }
+  pollWebSocketServer();
 
   uint8_t* jpgBuf = nullptr;
   size_t   jpgSize = 0;
-  bool ok = fmt2jpg(rawFrameBuffer, sizeof(rawFrameBuffer), 160, 120, PIXFORMAT_RGB565, 60, &jpgBuf, &jpgSize);
+  bool ok = fmt2jpg(rawFrameBuffer, sizeof(rawFrameBuffer), 160, 120, PIXFORMAT_RGB565, 55, &jpgBuf, &jpgSize);
   if (ok && jpgBuf && jpgSize > 0) {
     WiFiClient client = restServer.client();
     client.print("HTTP/1.1 200 OK\r\n"
@@ -496,9 +502,19 @@ void handleCameraSnapshot() {
     client.write(jpgBuf, jpgSize);
     free(jpgBuf);
   } else {
-    // Instant fallback to raw BMP if JPEG compression fails
-    handleCameraBmp();
+    // Instant fallback to raw BMP from already-captured rawFrameBuffer
+    size_t total = sizeof(BMP_HEADER_QQVGA_RGB565) + sizeof(rawFrameBuffer);
+    WiFiClient client = restServer.client();
+    client.print("HTTP/1.1 200 OK\r\n"
+                 "Content-Type: image/bmp\r\n"
+                 "Content-Length: " + String(total) + "\r\n"
+                 "Access-Control-Allow-Origin: *\r\n"
+                 "Cache-Control: no-store, no-cache, must-revalidate\r\n"
+                 "Connection: close\r\n\r\n");
+    client.write(BMP_HEADER_QQVGA_RGB565, sizeof(BMP_HEADER_QQVGA_RGB565));
+    client.write(rawFrameBuffer, sizeof(rawFrameBuffer));
   }
+  pollWebSocketServer();
 }
 // ===================================================================================
 // 7. RFC 6455 WEBSOCKET ENGINE (PORT 81)

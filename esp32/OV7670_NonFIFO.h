@@ -487,6 +487,9 @@ static SemaphoreHandle_t s_data_ready;
 static SemaphoreHandle_t s_line_ready;
 static SemaphoreHandle_t s_vsync_catch;
 static volatile bool vsync_check = false;
+static SemaphoreHandle_t s_frame_ready = NULL;
+static uint8_t* volatile s_dest_frame_buf = NULL;
+static volatile int s_dma_line[2] = {0, 0};
 
 static intr_handle_t s_i2s_intr_handle = NULL;
 
@@ -505,6 +508,9 @@ static void IRAM_ATTR VSYNC_isr( void *arg )
 	if( vsync_check ){
 		BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 		xSemaphoreGiveFromISR( s_vsync_catch, &xHigherPriorityTaskWoken);
+		if (xHigherPriorityTaskWoken != pdFALSE) {
+			portYIELD_FROM_ISR();
+		}
 	}
 }
 
@@ -528,6 +534,7 @@ esp_err_t I2S_camera_init(github_camera_config_t* config)
 	s_data_ready = xSemaphoreCreateBinary();
 	s_line_ready = xSemaphoreCreateBinary();
 	s_vsync_catch = xSemaphoreCreateBinary();
+	s_frame_ready = xSemaphoreCreateBinary();
 
 	i2s_init();
 	esp_err_t err = dma_desc_init();
@@ -551,7 +558,12 @@ esp_err_t I2S_camera_init(github_camera_config_t* config)
 
 static bool i2s_frameReadStart(void)
 {
-	if (xSemaphoreTake( s_vsync_catch, pdMS_TO_TICKS(150)) != pdTRUE) return false;
+	xSemaphoreTake(s_vsync_catch, 0); // Drain any stale VSYNC event
+	vsync_check = true;
+	if (xSemaphoreTake( s_vsync_catch, pdMS_TO_TICKS(150)) != pdTRUE) {
+		vsync_check = false;
+		return false;
+	}
 	vsync_check = false;
 	s_cur_buffer = 0;
 	s_line_count = 0;
@@ -730,22 +742,38 @@ esp_err_t  dma_desc_init(void)
 static void line_filter_task(void *pvParameters)
 {
 	while (true) {
+		if (xSemaphoreTake(s_data_ready, portMAX_DELAY) == pdTRUE) {
+			int buf_idx = !s_cur_buffer;
+			int line = s_dma_line[buf_idx];
 
-		xSemaphoreTake(s_data_ready, portMAX_DELAY);
-		int buf_idx = !s_cur_buffer;
+			if (s_dest_frame_buf != NULL && line >= 0 && line < s_buf_height) {
+				uint8_t* pfb = s_dest_frame_buf + (line * s_buf_line_width);
+				const uint32_t* buf = s_dma_buf[buf_idx];
 
+				for (int i = 0; i < s_buf_line_width / 2; ++i) {
+					uint32_t v = *buf++;	// Get 32 bit from DMA buffer
+					// 1 Pixel = (2Byte i2s overhead + 2Byte pixeldata)
+					*pfb++ = (uint8_t)(v & 0x000000ff);
+					*pfb++ = (uint8_t)((v & 0x00ff0000) >> 16);
+				}
+			} else {
+				s_fb_idx = (s_fb_idx + 1) % 2;
+				uint8_t* pfb_line = s_fb[s_fb_idx];
+				const uint32_t* buf_line = s_dma_buf[buf_idx];
+				for (int i = 0; i < s_buf_line_width / 2; ++i) {
+					uint32_t v = *buf_line++;
+					*pfb_line++ = (uint8_t)(v & 0x000000ff);
+					*pfb_line++ = (uint8_t)((v & 0x00ff0000) >> 16);
+				}
+			}
+			xSemaphoreGive(s_line_ready);
 
-		s_fb_idx = (s_fb_idx + 1) % 1;
-		uint8_t* pfb = s_fb[s_fb_idx];
-		const uint32_t* buf = s_dma_buf[buf_idx];
-
-		for (int i = 0; i < s_buf_line_width/2; ++i) {
-			uint32_t v = *buf++;	// Get 32 bit from DMA buffer
-			// 1 Pixel = (2Byte i2s overhead + 2Byte pixeldata)
-			*pfb++ = (uint8_t)(v & 0x000000ff);
-			*pfb++ = (uint8_t)((v & 0x00ff0000)>>16);
+			if (s_line_count >= s_buf_height) {
+				if (s_frame_ready != NULL) {
+					xSemaphoreGive(s_frame_ready);
+				}
+			}
 		}
-		xSemaphoreGive(s_line_ready);
 	}
 }
 
@@ -754,19 +782,21 @@ static void IRAM_ATTR i2s_isr(void* arg)	// 1 Line read done
 {
 	I2S0.int_clr.val = I2S0.int_raw.val;
 
+	int finished_buf = s_cur_buffer;
+	s_dma_line[finished_buf] = s_line_count;
+
 	s_cur_buffer = !s_cur_buffer;
 	++s_line_count;
-	if(s_line_count == s_buf_height) {		// 1 Frame read done
+	if(s_line_count >= s_buf_height) {		// 1 Frame read done
 		i2s_stop();
 	} else {
 		i2s_readStart(s_cur_buffer);
 	}
 	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 	xSemaphoreGiveFromISR(s_data_ready, &xHigherPriorityTaskWoken);
-/*	if (xHigherPriorityTaskWoken != pdFALSE) {
+	if (xHigherPriorityTaskWoken != pdFALSE) {
 		portYIELD_FROM_ISR();
 	}
-*/
 }
 
 
@@ -1288,6 +1318,9 @@ uint16_t* GitHubOV7670::getLine(uint16_t lineno){
 }
 
 bool GitHubOV7670::getLines(uint16_t lineno, uint8_t *buf, uint16_t n){
+	if (lineno == 1 && n == cam_conf.frame_height) {
+		return getFrame(buf);
+	}
 	uint16_t i,*p_buf;
 	uint16_t wb = cam_conf.frame_width * cam_conf.pixel_byte_num;
 
@@ -1300,7 +1333,37 @@ bool GitHubOV7670::getLines(uint16_t lineno, uint8_t *buf, uint16_t n){
 }
 
 bool GitHubOV7670::getFrame(uint8_t *buf){
-	return getLines( 1, buf, cam_conf.frame_height );
+	if (!s_initialized || buf == NULL) {
+		return false;
+	}
+
+	// Drain any previous frame ready token
+	if (s_frame_ready != NULL) {
+		xSemaphoreTake(s_frame_ready, 0);
+	}
+
+	// Assign destination frame buffer directly
+	s_dest_frame_buf = buf;
+
+	// Request frame capture aligned with VSYNC
+	if (!i2s_frameReadStart()) {
+		s_dest_frame_buf = NULL;
+		return false;
+	}
+
+	// Wait for frame to complete (at ~15-30 fps, frame time is 33-66ms; timeout 150ms)
+	BaseType_t res = pdFALSE;
+	if (s_frame_ready != NULL) {
+		res = xSemaphoreTake(s_frame_ready, pdMS_TO_TICKS(150));
+	}
+	s_dest_frame_buf = NULL;
+
+	if (res != pdTRUE) {
+		i2s_stop();
+		return false;
+	}
+
+	return true;
 }
 
 void GitHubOV7670::setColor(uint8_t colormode){
