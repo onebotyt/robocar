@@ -372,8 +372,8 @@ function scheduleWsReconnect() {
 }
 
 function sendWs(payload) {
-  // If silent for > 1800ms, socket is dead (power off) — don't report success
-  if (wsConnected && (Date.now() - lastWsMessageTime > 1800)) {
+  // If silent for > 4500ms, socket is dead (power off) — don't report success
+  if (wsConnected && (Date.now() - lastWsMessageTime > 4500)) {
     wsConnected = false;
     try { if (ws) ws.close(); } catch(e) {}
     setConnectionState(false);
@@ -1074,16 +1074,20 @@ if ($('closeCamModal') && $('cameraModal')) {
   };
 }
 
-function fetchCamFrame() {
+async function fetchCamFrame() {
   if (!camOn) return;
   const img = $('cam');
   if (!img) return;
-  const tempImg = new Image();
-  const frameUrl = `${base}/cam.jpg?t=${Date.now()}`;
-
-  tempImg.onload = () => {
+  try {
+    const res = await fetch(`${base}/cam.jpg?t=${Date.now()}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const blob = await res.blob();
     if (!camOn) return;
-    img.src = frameUrl;
+    const oldUrl = img.src;
+    img.src = URL.createObjectURL(blob);
+    if (oldUrl && oldUrl.startsWith('blob:')) {
+      setTimeout(() => URL.revokeObjectURL(oldUrl), 500);
+    }
     const standby = $('camStandby');
     if (standby) standby.classList.remove('active');
     camFrameCount++;
@@ -1093,16 +1097,10 @@ function fetchCamFrame() {
       camFrameCount = 0;
       lastFpsTime = now;
     }
-    // High-speed 50ms pacing delivers fluid 12-18 FPS
-    if (camOn) camTimer = setTimeout(fetchCamFrame, 50);
-  };
-
-  tempImg.onerror = () => {
-    if (!camOn) return;
-    if (camOn) camTimer = setTimeout(fetchCamFrame, 300);
-  };
-
-  tempImg.src = frameUrl;
+    if (camOn) camTimer = setTimeout(fetchCamFrame, 40);
+  } catch (e) {
+    if (camOn) camTimer = setTimeout(fetchCamFrame, 250);
+  }
 }
 
 if ($('camToggleBtn')) {

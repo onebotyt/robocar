@@ -487,9 +487,6 @@ static SemaphoreHandle_t s_data_ready;
 static SemaphoreHandle_t s_line_ready;
 static SemaphoreHandle_t s_vsync_catch;
 static volatile bool vsync_check = false;
-static SemaphoreHandle_t s_frame_ready = NULL;
-static uint8_t* volatile s_dest_frame_buf = NULL;
-static volatile int s_dma_line[2] = {0, 0};
 
 static intr_handle_t s_i2s_intr_handle = NULL;
 
@@ -534,7 +531,6 @@ esp_err_t I2S_camera_init(github_camera_config_t* config)
 	s_data_ready = xSemaphoreCreateBinary();
 	s_line_ready = xSemaphoreCreateBinary();
 	s_vsync_catch = xSemaphoreCreateBinary();
-	s_frame_ready = xSemaphoreCreateBinary();
 
 	i2s_init();
 	esp_err_t err = dma_desc_init();
@@ -560,7 +556,7 @@ static bool i2s_frameReadStart(void)
 {
 	xSemaphoreTake(s_vsync_catch, 0); // Drain any stale VSYNC event
 	vsync_check = true;
-	if (xSemaphoreTake( s_vsync_catch, pdMS_TO_TICKS(150)) != pdTRUE) {
+	if (xSemaphoreTake( s_vsync_catch, pdMS_TO_TICKS(1000)) != pdTRUE) {
 		vsync_check = false;
 		return false;
 	}
@@ -744,35 +740,18 @@ static void line_filter_task(void *pvParameters)
 	while (true) {
 		if (xSemaphoreTake(s_data_ready, portMAX_DELAY) == pdTRUE) {
 			int buf_idx = !s_cur_buffer;
-			int line = s_dma_line[buf_idx];
 
-			if (s_dest_frame_buf != NULL && line >= 0 && line < s_buf_height) {
-				uint8_t* pfb = s_dest_frame_buf + (line * s_buf_line_width);
-				const uint32_t* buf = s_dma_buf[buf_idx];
+			s_fb_idx = (s_fb_idx + 1) % 2;
+			uint8_t* pfb = s_fb[s_fb_idx];
+			const uint32_t* buf = s_dma_buf[buf_idx];
 
-				for (int i = 0; i < s_buf_line_width / 2; ++i) {
-					uint32_t v = *buf++;	// Get 32 bit from DMA buffer
-					// 1 Pixel = (2Byte i2s overhead + 2Byte pixeldata)
-					*pfb++ = (uint8_t)(v & 0x000000ff);
-					*pfb++ = (uint8_t)((v & 0x00ff0000) >> 16);
-				}
-			} else {
-				s_fb_idx = (s_fb_idx + 1) % 2;
-				uint8_t* pfb_line = s_fb[s_fb_idx];
-				const uint32_t* buf_line = s_dma_buf[buf_idx];
-				for (int i = 0; i < s_buf_line_width / 2; ++i) {
-					uint32_t v = *buf_line++;
-					*pfb_line++ = (uint8_t)(v & 0x000000ff);
-					*pfb_line++ = (uint8_t)((v & 0x00ff0000) >> 16);
-				}
+			for (int i = 0; i < s_buf_line_width / 2; ++i) {
+				uint32_t v = *buf++;	// Get 32 bit from DMA buffer
+				// 1 Pixel = (2Byte i2s overhead + 2Byte pixeldata)
+				*pfb++ = (uint8_t)(v & 0x000000ff);
+				*pfb++ = (uint8_t)((v & 0x00ff0000) >> 16);
 			}
 			xSemaphoreGive(s_line_ready);
-
-			if (s_line_count >= s_buf_height) {
-				if (s_frame_ready != NULL) {
-					xSemaphoreGive(s_frame_ready);
-				}
-			}
 		}
 	}
 }
@@ -782,14 +761,9 @@ static void IRAM_ATTR i2s_isr(void* arg)	// 1 Line read done
 {
 	I2S0.int_clr.val = I2S0.int_raw.val;
 
-	int finished_buf = s_cur_buffer;
-	s_dma_line[finished_buf] = s_line_count;
-
 	s_cur_buffer = !s_cur_buffer;
 	++s_line_count;
-	if(s_line_count >= s_buf_height) {		// 1 Frame read done
-		i2s_stop();
-	} else {
+	if (s_line_count < s_buf_height) {
 		i2s_readStart(s_cur_buffer);
 	}
 	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
@@ -1337,32 +1311,27 @@ bool GitHubOV7670::getFrame(uint8_t *buf){
 		return false;
 	}
 
-	// Drain any previous frame ready token
-	if (s_frame_ready != NULL) {
-		xSemaphoreTake(s_frame_ready, 0);
-	}
-
-	// Assign destination frame buffer directly
-	s_dest_frame_buf = buf;
-
-	// Request frame capture aligned with VSYNC
-	if (!i2s_frameReadStart()) {
-		s_dest_frame_buf = NULL;
-		return false;
-	}
-
-	// Wait for frame to complete (at ~15-30 fps, frame time is 33-66ms; timeout 150ms)
-	BaseType_t res = pdFALSE;
-	if (s_frame_ready != NULL) {
-		res = xSemaphoreTake(s_frame_ready, pdMS_TO_TICKS(150));
-	}
-	s_dest_frame_buf = NULL;
-
-	if (res != pdTRUE) {
+	if (s_i2s_running) {
 		i2s_stop();
+	}
+
+	// Drain any previous line ready token
+	xSemaphoreTake(s_line_ready, 0);
+
+	// Start frame capture aligned with next VSYNC falling edge
+	if (!i2s_frameReadStart()) {
 		return false;
 	}
 
+	uint16_t wb = cam_conf.frame_width * cam_conf.pixel_byte_num;
+	for (int line = 0; line < cam_conf.frame_height; line++) {
+		if (xSemaphoreTake(s_line_ready, pdMS_TO_TICKS(400)) != pdTRUE) {
+			i2s_stop();
+			return false;
+		}
+		memcpy(&buf[line * wb], (uint8_t*)s_fb[s_fb_idx], wb);
+	}
+	i2s_stop();
 	return true;
 }
 
