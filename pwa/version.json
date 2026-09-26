@@ -1,12 +1,12 @@
 {
-  "version": "2.4.44",
-  "buildCode": 44,
-  "buildDate": "2026-09-25",
+  "version": "2.4.45",
+  "buildCode": 45,
+  "buildDate": "2026-09-26",
   "changelog": "NovaX V2.4.38: Dedicated non-FIFO OV7670 I2S DMA camera engine with dual JPEG/BMP streaming and auto-fallback.",
   "firmware": {
-    "version": "2.4.44",
+    "version": "2.4.45",
     "binUrl": "https://raw.githubusercontent.com/onebotyt/robocar/main/firmware/NovaX-Firmware.bin",
-    "releaseDate": "2026-09-25",
+    "releaseDate": "2026-09-26",
     "changelog": "ESP32 V2.4.38: Native non-FIFO OV7670 parallel I2S DMA driver, /cam.bmp and /cam.jpg endpoints, fixing FB-SIZE mismatch."
   },
   "repo": "onebotyt/robocar",

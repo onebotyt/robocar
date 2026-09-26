@@ -1,6 +1,6 @@
 {
-  "version": "2.4.44",
-  "buildDate": "2026-09-25",
+  "version": "2.4.45",
+  "buildDate": "2026-09-26",
   "target": "ESP32-WROOM-32",
   "binFile": "NovaX-Firmware.bin",
   "downloadUrl": "https://raw.githubusercontent.com/onebotyt/robocar/main/firmware/NovaX-Firmware.bin",

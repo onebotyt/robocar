@@ -1500,7 +1500,7 @@ async function flashCloudOta() {
 }
 
 // ================= GITHUB APP UPDATER (WITH INTEGRITY CHECK & ROLLBACK) =================
-const CURRENT_APP_VERSION = '2.4.44';
+const CURRENT_APP_VERSION = '2.4.45';
 
 function getGitHubConfig() {
   const repo = $('ghRepoInput')?.value.trim() || localStorage.getItem('novax_gh_repo') || 'onebotyt/robocar';
