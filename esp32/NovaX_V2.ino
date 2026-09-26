@@ -60,6 +60,16 @@
 #include <WebServer.h>
 #include <ESP32Servo.h>
 #include <Wire.h>
+
+// ===================================================================================
+// HARDWARE FEATURE TOGGLES
+// ===================================================================================
+// Set ENABLE_CAMERA to 0: Disables OV7670 camera completely. Allows running the car
+//                         with motors, ultrasonic, servo, gyro, LEDs, and OTA without camera.
+// Set ENABLE_CAMERA to 1: Re-enables OV7670 camera engine over I2S DMA.
+#define ENABLE_CAMERA 0
+
+#if ENABLE_CAMERA
 // Resolve typedef conflict between Adafruit_Sensor and esp32-camera
 #define sensor_t adafruit_sensor_t
 #include <Adafruit_MPU6050.h>
@@ -68,6 +78,11 @@
 #include <esp_camera.h>
 #include <img_converters.h>
 #include "OV7670_NonFIFO.h"
+#else
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#endif
+
 #include <Preferences.h>
 #include <ESPmDNS.h>
 #include <Update.h>
@@ -156,7 +171,9 @@ float         gyroZBias     = 0.0f;
 float         yawHeading    = 0.0f;
 unsigned long lastGyroMicros = 0;
 // Camera State
+#if ENABLE_CAMERA
 GitHubOV7670 nonFifoCam;
+#endif
 bool cameraAvailable = false;
 // 74HC595 LED State
 String        currentLedEffect = "off";
@@ -398,6 +415,7 @@ void stepNonBlockingRotate() {
 // ===================================================================================
 // 6. NON-FIFO OV7670 CAMERA ENGINE (DIRECT I2S DMA -> JPEG / BMP)
 // ===================================================================================
+#if ENABLE_CAMERA
 // 66-byte BMP Header for 160x120 16-bit RGB565 (Top-down uncompressed bitmap)
 static const uint8_t BMP_HEADER_QQVGA_RGB565[66] = {
   0x42, 0x4D,             // 'BM'
@@ -516,6 +534,23 @@ void handleCameraSnapshot() {
   }
   pollWebSocketServer();
 }
+#else
+// Camera disabled stubs: ensures car runs reliably without camera connected
+bool initCamera() {
+  Serial.println("[CAMERA] Camera disabled in firmware (ENABLE_CAMERA = 0). Running car without camera.");
+  return false;
+}
+
+void handleCameraBmp() {
+  setCorsHeaders();
+  restServer.send(503, "text/plain", "Camera disabled in firmware");
+}
+
+void handleCameraSnapshot() {
+  setCorsHeaders();
+  restServer.send(503, "text/plain", "Camera disabled in firmware");
+}
+#endif
 // ===================================================================================
 // 7. RFC 6455 WEBSOCKET ENGINE (PORT 81)
 // ===================================================================================
