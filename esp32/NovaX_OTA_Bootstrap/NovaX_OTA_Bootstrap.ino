@@ -185,6 +185,29 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       }
     };
 
+    // Drag-and-drop support
+    const dropzone = document.querySelector('.dropzone');
+    ['dragenter', 'dragover'].forEach(evt => {
+      dropzone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        dropzone.style.borderColor = 'var(--cyan)';
+        dropzone.style.background = 'rgba(6, 182, 212, 0.08)';
+      });
+    });
+    ['dragleave', 'drop'].forEach(evt => {
+      dropzone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        dropzone.style.borderColor = 'var(--border)';
+        dropzone.style.background = 'rgba(255, 255, 255, 0.02)';
+      });
+    });
+    dropzone.addEventListener('drop', (e) => {
+      if (e.dataTransfer && e.dataTransfer.files.length) {
+        fwInput.files = e.dataTransfer.files;
+        fwInput.dispatchEvent(new Event('change'));
+      }
+    });
+
     function uploadFirmware() {
       if (!fwInput.files.length) return;
       const file = fwInput.files[0];
@@ -276,10 +299,27 @@ void setup() {
     }
   });
 
-  // Root Web UI
-  server.on("/", HTTP_GET, []() {
+  // Root Web UI & Captive Portal Redirection
+  auto sendIndexHtml = []() {
     setCorsHeaders();
     server.send_P(200, "text/html", INDEX_HTML);
+  };
+
+  server.on("/", HTTP_GET, sendIndexHtml);
+  server.on("/index.html", HTTP_GET, sendIndexHtml);
+  server.on("/update", HTTP_GET, sendIndexHtml);
+  server.on("/ota/update", HTTP_GET, sendIndexHtml);
+
+  // Captive Portal probes redirect to root
+  server.on("/generate_204", HTTP_GET, []() {
+    setCorsHeaders();
+    server.sendHeader("Location", "http://192.168.4.1/");
+    server.send(302, "text/plain", "");
+  });
+  server.on("/hotspot-detect.html", HTTP_GET, []() {
+    setCorsHeaders();
+    server.sendHeader("Location", "http://192.168.4.1/");
+    server.send(302, "text/plain", "");
   });
 
   // Status & Identification for NovaX Controller App
@@ -300,13 +340,13 @@ void setup() {
     server.send(
       ok ? 200 : 500,
       "application/json",
-      ok ? "{\"status\":\"ok\",\"success\":true,\"restarting\":true}"
+      ok ? "{\"status\":\"ok\",\"success\":true,\"restarting\":true,\"message\":\"Firmware flashed successfully! Rebooting...\"}"
          : "{\"status\":\"error\",\"success\":false,\"error\":\"Update failed\"}"
     );
 
     if (ok) {
-      Serial.println("[OTA] Firmware successfully written! Rebooting ESP32...");
-      delay(800);
+      Serial.println("[OTA] Firmware successfully written! Rebooting ESP32 in 1s...");
+      delay(1000);
       ESP.restart();
     } else {
       Serial.println("[OTA] Firmware flashing failed!");
@@ -319,8 +359,12 @@ void setup() {
     if (upload.status == UPLOAD_FILE_START) {
       Serial.printf("[OTA] Flashing started: %s\n", upload.filename.c_str());
 
-      // Begin update on OTA partition
-      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      if (Update.isRunning()) {
+        Update.abort();
+      }
+
+      // Begin update targeting flash application partition (U_FLASH)
+      if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
         Update.printError(Serial);
       }
     } else if (upload.status == UPLOAD_FILE_WRITE) {

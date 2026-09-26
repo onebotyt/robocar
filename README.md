@@ -11,6 +11,7 @@
 ---
 
 ### 🌐 Quick Links & Live Demos
+- **📊 [Project Presentation & Slides Deck](PRESENTATION.md)**
 - **🎮 [Live Web Cockpit (Browser Preview)](https://onebotyt.github.io/robocar/)**
 - **📲 [Download Android APK Directly](https://github.com/onebotyt/robocar/raw/main/apk/NovaX-Controller.apk)**
 - **📑 [Detailed WebSocket Protocol](docs/WEBSOCKET_PROTOCOL.md)**
