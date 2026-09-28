@@ -47,7 +47,7 @@
 // ===================================================================================
 // 2. CONSTANTS & SYSTEM CONFIGURATION
 // ===================================================================================
-const char* FIRMWARE_VERSION  = "2.4.48";
+const char* FIRMWARE_VERSION  = "2.4.50";
 const char* HARDWARE_VERSION  = "ESP32-V2-NOCAM";
 const char* BUILD_DATE        = "2026-09-28";
 const char* AP_DEFAULT_SSID   = "NovaX-Car";
