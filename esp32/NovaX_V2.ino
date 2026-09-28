@@ -275,25 +275,50 @@ void motorMix(float turn, float speed) {
   lastDriveCmdMs = millis();
 }
 
-// Ultrasonic with TTL Cache
+// Ultrasonic with Noise Filtering & Stuck-Pin Guard
 long readUltrasonicCM() {
   if (!sonarActive) return 400;
   unsigned long now = millis();
   if (now - sonarCacheTime < SONAR_CACHE_MS && sonarCacheValue > 0) {
     return sonarCacheValue;
   }
+
+  // Ensure ECHO pin is not stuck HIGH before triggering
+  if (digitalRead(ECHO_PIN) == HIGH) {
+    unsigned long waitStart = micros();
+    while (digitalRead(ECHO_PIN) == HIGH && (micros() - waitStart < 2000));
+  }
+
+  // Clean trigger pulse
   digitalWrite(TRIG_PIN, LOW);
-  delayMicroseconds(2);
+  delayMicroseconds(4);
   digitalWrite(TRIG_PIN, HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
 
-  unsigned long duration = pulseIn(ECHO_PIN, HIGH, 25000);
-  if (duration == 0) {
-    sonarCacheValue = 400;
+  // Measure echo pulse (20000us timeout = ~3.4m max range)
+  unsigned long duration = pulseIn(ECHO_PIN, HIGH, 20000);
+  static int consecutiveFails = 0;
+
+  if (duration == 0 || duration >= 20000) {
+    consecutiveFails++;
+    // Only set to 400 after 2 consecutive timeouts to eliminate flickering spikes
+    if (consecutiveFails >= 2) {
+      sonarCacheValue = 400;
+    }
   } else {
-    sonarCacheValue = (long)(duration * 0.0343f / 2.0f);
-    if (sonarCacheValue <= 0 || sonarCacheValue > 400) sonarCacheValue = 400;
+    consecutiveFails = 0;
+    long cm = (long)(duration / 58.2f);
+    if (cm >= 2 && cm <= 400) {
+      // Gentle smoothing if previous reading was valid
+      if (sonarCacheValue > 0 && sonarCacheValue < 400) {
+        sonarCacheValue = (long)(sonarCacheValue * 0.25f + cm * 0.75f);
+      } else {
+        sonarCacheValue = cm;
+      }
+    } else {
+      sonarCacheValue = 400;
+    }
   }
   sonarCacheTime = now;
   return sonarCacheValue;
@@ -303,7 +328,7 @@ void invalidateSonarCache() {
   sonarCacheTime = 0;
 }
 
-// Servo Motor Head Control
+// Servo Motor Head Control (Kept continuously attached to avoid timer/channel exhaustion)
 void setRadarServo(int angle) {
   angle = constrain(angle, 0, 180);
   if (!radarServo.attached()) {
@@ -325,7 +350,7 @@ void startRadarScan() {
 void stepRadarScan() {
   if (radarState != SCAN_RUNNING) return;
   unsigned long now = millis();
-  if (now - lastRadarStepMs < 90) return;
+  if (now - lastRadarStepMs < 130) return; // 130ms settle time per step for physical servo motion
   lastRadarStepMs = now;
 
   int servoAngle = radarCurrentAngle + 90; // -90..90 -> 0..180
@@ -343,9 +368,7 @@ void stepRadarScan() {
 
   radarCurrentAngle += 30;
   if (radarCurrentAngle > 90) {
-    setRadarServo(90);
-    delay(100);
-    radarServo.detach();
+    setRadarServo(90); // Return to center position (stays attached!)
     radarState = SCAN_DONE;
 
     broadcastWsText("{\"type\":\"radar_summary\",\"left\":" + String(scanDistLeft)
@@ -405,6 +428,45 @@ void calibrateGyro() {
   Serial.printf("[MPU6050] Calibrated. Zero bias: %.4f rad/s\n", gyroZBias);
 }
 
+bool tryInitMPUAt(uint8_t addr) {
+  Wire.beginTransmission(addr);
+  byte err = Wire.endTransmission();
+  if (err != 0) return false;
+
+  Serial.printf("[MPU6050] ACK at 0x%02X! Waking up & reading WHO_AM_I...\n", addr);
+
+  // Wake up device: write 0x00 to PWR_MGMT_1 register (0x6B)
+  Wire.beginTransmission(addr);
+  Wire.write(0x6B);
+  Wire.write(0x00);
+  Wire.endTransmission();
+  delay(10);
+
+  // Read WHO_AM_I register (0x75)
+  Wire.beginTransmission(addr);
+  Wire.write(0x75);
+  Wire.endTransmission(false);
+  Wire.requestFrom((uint8_t)addr, (uint8_t)1);
+  if (Wire.available()) {
+    uint8_t whoami = Wire.read();
+    Serial.printf("[MPU6050] Chip WHO_AM_I register = 0x%02X\n", whoami);
+  }
+
+  if (mpu.begin(addr, &Wire)) {
+    mpuI2cAddress = addr;
+    mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+    calibrateGyro();
+    mpuAvailable = true;
+    Serial.printf("[MPU6050] Succeeded on address 0x%02X! Calibrated & Ready.\n", addr);
+    return true;
+  } else {
+    Serial.printf("[MPU6050] ACK at 0x%02X but mpu.begin() failed.\n", addr);
+    return false;
+  }
+}
+
 void initMPU() {
   // Configure internal pullups on I2C lines
   pinMode(MPU_SDA, INPUT_PULLUP);
@@ -422,66 +484,64 @@ void initMPU() {
   pinMode(MPU_SCL, INPUT_PULLUP);
   delay(15);
 
+  // 1. Try standard pins: SDA=21, SCL=22
   Wire.begin(MPU_SDA, MPU_SCL, 100000);
   Wire.setTimeOut(50); // Prevent bus lockup from stalling main loop
 
-  // Both standard MPU6050 addresses:
-  // 0x68 (when AD0 is connected to GND)
-  // 0x69 (when AD0 is connected to 5V/3.3V or floating with internal pull-up)
   const uint8_t TARGET_ADDRS[] = { 0x68, 0x69 };
 
   for (int attempt = 1; attempt <= 3; attempt++) {
     for (int i = 0; i < 2; i++) {
       uint8_t addr = TARGET_ADDRS[i];
-      Serial.printf("[MPU6050] Probing address 0x%02X (attempt %d)...\n", addr, attempt);
-
-      Wire.beginTransmission(addr);
-      byte err = Wire.endTransmission();
-      if (err == 0) {
-        Serial.printf("[MPU6050] Responding at address 0x%02X! Calling mpu.begin()...\n", addr);
-        if (mpu.begin(addr, &Wire)) {
-          mpuI2cAddress = addr;
-          mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
-          mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-          mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-          calibrateGyro();
-          mpuAvailable = true;
-          Serial.printf("[MPU6050] Succeeded on address 0x%02X! Calibrated & Ready.\n", addr);
-          return;
-        } else {
-          Serial.printf("[MPU6050] ACK at 0x%02X but mpu.begin() failed. Trying alternate address...\n", addr);
-        }
-      }
+      Serial.printf("[MPU6050] Probing 0x%02X on SDA=21, SCL=22 (attempt %d)...\n", addr, attempt);
+      if (tryInitMPUAt(addr)) return;
     }
-    delay(60);
+    delay(50);
   }
 
-  // Fallback: Scan full 7-bit I2C bus in case module is at another address
-  Serial.println("[MPU6050] Neither 0x68 nor 0x69 responded. Scanning entire I2C bus (0x01..0x7F)...");
+  // 2. What if SDA and SCL are swapped? Test SDA=22, SCL=21!
+  Serial.println("[MPU6050] Standard pins didn't answer. Testing if SDA & SCL are swapped (SDA=22, SCL=21)...");
+  Wire.end();
+  pinMode(22, INPUT_PULLUP);
+  pinMode(21, INPUT_PULLUP);
+  delay(20);
+  Wire.begin(22, 21, 100000);
+  Wire.setTimeOut(50);
+
+  for (int i = 0; i < 2; i++) {
+    uint8_t addr = TARGET_ADDRS[i];
+    Serial.printf("[MPU6050] Probing 0x%02X on swapped pins SDA=22, SCL=21...\n", addr);
+    if (tryInitMPUAt(addr)) {
+      Serial.println("[MPU6050] >>> SUCCESS ON SWAPPED PINS! (SDA=GPIO22, SCL=GPIO21) <<<");
+      return;
+    }
+  }
+
+  // 3. Restore standard pins and do full 7-bit bus scan
+  Wire.end();
+  pinMode(MPU_SDA, INPUT_PULLUP);
+  pinMode(MPU_SCL, INPUT_PULLUP);
+  Wire.begin(MPU_SDA, MPU_SCL, 100000);
+  Wire.setTimeOut(50);
+
+  Serial.println("[MPU6050] Scanning entire I2C bus (0x01..0x7F)...");
   int found = 0;
   for (uint8_t a = 1; a < 127; a++) {
     Wire.beginTransmission(a);
     if (Wire.endTransmission() == 0) {
-      Serial.printf("[I2C] Found responding device at 0x%02X\n", a);
+      Serial.printf("[I2C] Device ACK at 0x%02X\n", a);
       found++;
-      if (mpu.begin(a, &Wire)) {
-        mpuI2cAddress = a;
-        mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
-        mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-        mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-        calibrateGyro();
-        mpuAvailable = true;
-        Serial.printf("[MPU6050] Initialized at fallback address 0x%02X!\n", a);
-        return;
-      }
+      if (tryInitMPUAt(a)) return;
     }
   }
 
   mpuAvailable = false;
   Serial.println("[MPU6050] Not detected on I2C bus.");
   if (found == 0) {
-    Serial.println("[MPU6050] Check wiring: VCC->5V Booster, GND->GND, SDA->21, SCL->22.");
-    Serial.println("[MPU6050] If AD0 is floating or pulled HIGH, address is 0x69. If AD0 is GND, address is 0x68.");
+    Serial.println("[MPU6050] TROUBLESHOOTING CHECKLIST:");
+    Serial.println("  1. Booster GND MUST be connected to ESP32 GND (Common Ground required)!");
+    Serial.println("  2. Check MPU VCC has 5V (or 3.3V).");
+    Serial.println("  3. Check SDA to GPIO 21, SCL to GPIO 22.");
   }
 }
 
@@ -603,7 +663,6 @@ void stepAutoNav() {
 
       setRadarServo(90);
       delay(180);
-      radarServo.detach();
 
       if (scanDistLeft > scanDistRight && scanDistLeft > 25) {
         startNonBlockingRotate(60.0f, false);
@@ -1214,6 +1273,16 @@ void setup() {
   delay(200);
   Serial.println("\n[NovaX V2 - Pure Car Edition] Initializing...");
 
+  // Initialize ESP32PWM timers for ESP32Servo before analogWrite claims them
+  ESP32PWM::allocateTimer(0);
+  ESP32PWM::allocateTimer(1);
+  ESP32PWM::allocateTimer(2);
+  ESP32PWM::allocateTimer(3);
+  radarServo.setPeriodHertz(50);
+  radarServo.attach(SERVO_PIN, 500, 2400);
+  radarServo.write(90); // Physical center
+  Serial.printf("[SERVO] Initialized and attached to GPIO %d (Centered to 90 deg)\n", SERVO_PIN);
+
   initPins();
   initMPU();
 
@@ -1369,10 +1438,8 @@ void setup() {
   wsServer.begin();
   wsServer.setNoDelay(true);
 
-  // Centre radar servo at boot
+  // Confirm radar servo is centered and ready
   setRadarServo(90);
-  delay(200);
-  radarServo.detach();
 
   manualMode  = true;
   carStopped  = false;
