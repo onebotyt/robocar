@@ -3,7 +3,7 @@
  *  NovaX V2 (No-Camera Edition) - Autonomous & Remote Robot Car Firmware
  *  Hardware Target: ESP32-WROOM-32 (V2 Hardware Map)
  *  Architecture: WebSocket Real-Time Control (:81) + REST Config (:80) + OTA Engine
- *  Version: 2.4.48  (Pure Car Edition: Motors + Sonar + Radar Servo + MPU6050 Gyro + LEDs)
+ *  Version: 2.4.52  (Pure Car Edition: Motors + Sonar + Radar Servo + MPU6050 Gyro + LEDs)
  * ===================================================================================
  */
 #include <WiFi.h>
@@ -17,7 +17,15 @@
 #include <Update.h>
 #include <mbedtls/sha1.h>
 #include <mbedtls/base64.h>
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
 
+// Compatibility macros for mbedtls 2.x vs 3.x
+#if !defined(MBEDTLS_DEPRECATED_REMOVED) && !defined(mbedtls_sha1_starts_ret)
+  #define mbedtls_sha1_starts_ret(ctx)              mbedtls_sha1_starts(ctx)
+  #define mbedtls_sha1_update_ret(ctx, input, ilen) mbedtls_sha1_update(ctx, input, ilen)
+  #define mbedtls_sha1_finish_ret(ctx, output)      mbedtls_sha1_finish(ctx, output)
+#endif
 
 // ===================================================================================
 // 1. FINALIZED ESP32 V2 GPIO MAPPING — PURE CAR (CUSTOM HARDWARE LAYOUT)
@@ -75,21 +83,27 @@ const uint8_t MAX_WS_CLIENTS = 4;
 // ===================================================================================
 // 3. GLOBAL INSTANCES & SYSTEM STATE
 // ===================================================================================
-WebServer  restServer(80);
-WiFiServer wsServer(81);
-WiFiClient wsClients[MAX_WS_CLIENTS];
+WebServer        restServer(80);
+WiFiServer       wsServer(81);
+WiFiClient       wsClients[MAX_WS_CLIENTS];
 Servo            radarServo;
 Adafruit_MPU6050 mpu;
 Preferences      nvsPrefs;
 
-// Motor Safety State
+// Motor Safety & Soft-Start State (Protects against battery sag / brownout)
 volatile unsigned long lastDriveCmdMs = 0;
 volatile bool motorRunning = false;
 volatile bool manualMode   = true;
 volatile bool carStopped   = false;
+int targetPwmLeft          = 0;
+int targetPwmRight         = 0;
+int currentPwmLeft         = 0;
+int currentPwmRight        = 0;
+unsigned long lastMotorRampMs = 0;
 
 // MPU6050 Attitude & Gyro State
 bool          mpuAvailable   = false;
+uint8_t       mpuI2cAddress  = 0x68;
 float         gyroZBias      = 0.0f;
 float         yawHeading     = 0.0f;
 float         pitchAngle     = 0.0f;
@@ -118,7 +132,7 @@ enum AutoDriveState {
   AUTO_STOPPED, AUTO_FORWARD, AUTO_DETECTED,
   AUTO_REVERSE, AUTO_SCAN, AUTO_TURN
 };
-AutoDriveState autoState      = AUTO_STOPPED;
+AutoDriveState autoState       = AUTO_STOPPED;
 unsigned long  autoActionTimer = 0;
 
 // Non-blocking gyro rotate state
@@ -129,22 +143,25 @@ bool          rotateTurnRight = true;
 float         rotateInitYaw   = 0.0f;
 unsigned long rotateStartMs   = 0;
 
-// Wi-Fi deferred STA connect
+// Wi-Fi deferred STA connect & scan state
 bool          pendingStaConnect = false;
 String        pendingStaSsid    = "";
 String        pendingStaPass    = "";
 unsigned long pendingStaDelay   = 0;
-bool          wifiScanPending    = false;
-unsigned long wifiScanStartedMs  = 0;
+bool          wifiScanPending   = false;
+unsigned long wifiScanStartedMs = 0;
 
-// OTA auth per-upload flag
-bool otaAuthorised = false;
-int activeWifiIndex = -1;
+// OTA auth flag
+bool otaAuthorised   = false;
+int  activeWifiIndex = -1;
 
 // Forward Declarations
 void stopCar();
 void motorWrite(int pinF, int pinB, int pwm);
 void motorMix(float turn, float speed);
+void setRadarServo(int angle);
+void startRadarScan();
+void stepRadarScan();
 long readUltrasonicCM();
 void broadcastWsText(const String& payload);
 void handleWsMessage(WiFiClient& client, const String& msg);
@@ -154,9 +171,18 @@ void updateGyroHeading();
 void calibrateGyro();
 void stepNonBlockingRotate();
 void pollWebSocketServer();
+String getWifiProfilesJson();
+void handleWifiScan();
+void handleWifiSaved();
+void handleWifiSave();
+void handleWifiSelect();
+void handleWifiDelete();
+void handleSwitchSTA();
+void handleSwitchAP();
+void processPendingStaConnect();
 
 // ===================================================================================
-// 4. LOW-LEVEL HARDWARE DRIVERS
+// 4. LOW-LEVEL HARDWARE DRIVERS & SLEW-RATE MOTOR CONTROLLER
 // ===================================================================================
 void write595(uint8_t value) {
   digitalWrite(LED_LATCH, LOW);
@@ -191,7 +217,35 @@ void motorWrite(int pinF, int pinB, int pwm) {
   }
 }
 
+// Slew-rate ramping: smooths rapid acceleration to prevent power rail brownout & Wi-Fi disconnect
+void stepMotorRamp() {
+  unsigned long now = millis();
+  if (now - lastMotorRampMs < 10) return;
+  lastMotorRampMs = now;
+
+  const int RAMP_STEP = 35; // Ramps 0 to 255 in ~70ms — stops inrush voltage collapse!
+
+  if (currentPwmLeft < targetPwmLeft) {
+    currentPwmLeft = min(currentPwmLeft + RAMP_STEP, targetPwmLeft);
+  } else if (currentPwmLeft > targetPwmLeft) {
+    currentPwmLeft = max(currentPwmLeft - RAMP_STEP, targetPwmLeft);
+  }
+
+  if (currentPwmRight < targetPwmRight) {
+    currentPwmRight = min(currentPwmRight + RAMP_STEP, targetPwmRight);
+  } else if (currentPwmRight > targetPwmRight) {
+    currentPwmRight = max(currentPwmRight - RAMP_STEP, targetPwmRight);
+  }
+
+  motorWrite(MOTOR_IN1, MOTOR_IN2, currentPwmLeft);
+  motorWrite(MOTOR_IN3, MOTOR_IN4, currentPwmRight);
+}
+
 void stopCar() {
+  targetPwmLeft   = 0;
+  targetPwmRight  = 0;
+  currentPwmLeft  = 0;
+  currentPwmRight = 0;
   motorWrite(MOTOR_IN1, MOTOR_IN2, 0);
   motorWrite(MOTOR_IN3, MOTOR_IN4, 0);
   motorRunning = false;
@@ -214,13 +268,10 @@ void motorMix(float turn, float speed) {
     right /= maxMag;
   }
 
-  int leftPwm  = (int)(left  * 255.0f);
-  int rightPwm = (int)(right * 255.0f);
+  targetPwmLeft  = (int)(left  * 255.0f);
+  targetPwmRight = (int)(right * 255.0f);
 
-  motorWrite(MOTOR_IN1, MOTOR_IN2, leftPwm);
-  motorWrite(MOTOR_IN3, MOTOR_IN4, rightPwm);
-
-  motorRunning   = (leftPwm != 0 || rightPwm != 0);
+  motorRunning   = (targetPwmLeft != 0 || targetPwmRight != 0);
   lastDriveCmdMs = millis();
 }
 
@@ -250,6 +301,57 @@ long readUltrasonicCM() {
 
 void invalidateSonarCache() {
   sonarCacheTime = 0;
+}
+
+// Servo Motor Head Control
+void setRadarServo(int angle) {
+  angle = constrain(angle, 0, 180);
+  if (!radarServo.attached()) {
+    radarServo.attach(SERVO_PIN, 500, 2400);
+  }
+  radarServo.write(angle);
+}
+
+// Radar Sweeper State Machine
+void startRadarScan() {
+  radarState        = SCAN_RUNNING;
+  radarCurrentAngle = -90;
+  radarStepDir      = 1;
+  invalidateSonarCache();
+  setRadarServo(0); // -90 deg maps to 0 deg
+  lastRadarStepMs   = millis();
+}
+
+void stepRadarScan() {
+  if (radarState != SCAN_RUNNING) return;
+  unsigned long now = millis();
+  if (now - lastRadarStepMs < 90) return;
+  lastRadarStepMs = now;
+
+  int servoAngle = radarCurrentAngle + 90; // -90..90 -> 0..180
+  setRadarServo(servoAngle);
+
+  invalidateSonarCache();
+  long dist = readUltrasonicCM();
+
+  broadcastWsText("{\"type\":\"radar\",\"angle\":" + String(radarCurrentAngle)
+                  + ",\"distance\":" + String(dist) + "}");
+
+  if (radarCurrentAngle == -90)      scanDistLeft  = (int)dist;
+  else if (radarCurrentAngle == 0)   scanDistFront = (int)dist;
+  else if (radarCurrentAngle == 90)  scanDistRight = (int)dist;
+
+  radarCurrentAngle += 30;
+  if (radarCurrentAngle > 90) {
+    setRadarServo(90);
+    delay(100);
+    radarServo.detach();
+    radarState = SCAN_DONE;
+
+    broadcastWsText("{\"type\":\"radar_summary\",\"left\":" + String(scanDistLeft)
+                    + ",\"front\":" + String(scanDistFront)
+                    + ",\"right\":" + String(scanDistRight) + ",\"done\":true}");
+  }
 }
 
 // 74HC595 LED Animation Patterns
@@ -282,13 +384,13 @@ void updateLEDs() {
 }
 
 // ===================================================================================
-// 5. MPU6050 GYROSCOPE, ATTITUDE & CALIBRATION
+// 5. MPU6050 GYROSCOPE, ATTITUDE & CALIBRATION (WITH AUTO I2C BUS SCAN)
 // ===================================================================================
 void calibrateGyro() {
   stopCar();
   delay(100);
   float sumZ  = 0;
-  int samples = 250;
+  int samples = 200;
   for (int i = 0; i < samples; i++) {
     sensors_event_t a, g, temp;
     mpu.getEvent(&a, &g, &temp);
@@ -304,17 +406,76 @@ void calibrateGyro() {
 }
 
 void initMPU() {
+  // Configure internal pullups on I2C lines
+  pinMode(MPU_SDA, INPUT_PULLUP);
+  pinMode(MPU_SCL, INPUT_PULLUP);
+  delay(10);
+
+  // Unwedge stuck I2C bus if slave held SDA low
+  pinMode(MPU_SCL, OUTPUT);
+  for (int i = 0; i < 9; i++) {
+    digitalWrite(MPU_SCL, HIGH);
+    delayMicroseconds(5);
+    digitalWrite(MPU_SCL, LOW);
+    delayMicroseconds(5);
+  }
+  pinMode(MPU_SCL, INPUT_PULLUP);
+  delay(10);
+
   Wire.begin(MPU_SDA, MPU_SCL, 100000);
-  if (mpu.begin()) {
-    mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
-    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-    calibrateGyro();
-    mpuAvailable = true;
-    Serial.println("[MPU6050] Initialized and calibrated.");
+  Wire.setTimeOut(50); // Prevent bus lockup from stalling main loop
+
+  // Probe both standard MPU addresses (0x68 when AD0=GND, 0x69 when AD0=VCC/Floating)
+  uint8_t targetAddr = 0;
+  Wire.beginTransmission(0x68);
+  if (Wire.endTransmission() == 0) {
+    targetAddr = 0x68;
   } else {
-    mpuAvailable = false;
-    Serial.println("[MPU6050] Not detected on I2C bus.");
+    Wire.beginTransmission(0x69);
+    if (Wire.endTransmission() == 0) {
+      targetAddr = 0x69;
+    }
+  }
+
+  if (targetAddr != 0) {
+    Serial.printf("[MPU6050] Responding at address 0x%02X\n", targetAddr);
+    if (mpu.begin(targetAddr, &Wire)) {
+      mpuI2cAddress = targetAddr;
+      mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+      mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+      mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+      calibrateGyro();
+      mpuAvailable = true;
+      Serial.printf("[MPU6050] Initialized and calibrated at 0x%02X.\n", targetAddr);
+      return;
+    }
+  }
+
+  // Fallback: Scan full 7-bit I2C bus for diagnostics
+  Serial.println("[MPU6050] Probing all I2C addresses (0x01..0x7F)...");
+  int found = 0;
+  for (uint8_t a = 1; a < 127; a++) {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() == 0) {
+      Serial.printf("[I2C] Found device at 0x%02X\n", a);
+      found++;
+      if (mpu.begin(a, &Wire)) {
+        mpuI2cAddress = a;
+        mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+        mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+        mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+        calibrateGyro();
+        mpuAvailable = true;
+        Serial.printf("[MPU6050] Initialized at 0x%02X!\n", a);
+        return;
+      }
+    }
+  }
+
+  mpuAvailable = false;
+  Serial.println("[MPU6050] Not detected on I2C bus.");
+  if (found == 0) {
+    Serial.println("[MPU6050] Check wiring: VCC->3.3V/5V, GND->GND, SDA->21, SCL->22, AD0->GND.");
   }
 }
 
@@ -349,11 +510,11 @@ void updateGyroHeading() {
 void startNonBlockingRotate(float targetDeg, bool turnRight) {
   int pwm = TURN_SPEED_PWM;
   if (turnRight) {
-    motorWrite(MOTOR_IN1, MOTOR_IN2,  pwm);
-    motorWrite(MOTOR_IN3, MOTOR_IN4, -pwm);
+    targetPwmLeft  =  pwm;
+    targetPwmRight = -pwm;
   } else {
-    motorWrite(MOTOR_IN1, MOTOR_IN2, -pwm);
-    motorWrite(MOTOR_IN3, MOTOR_IN4,  pwm);
+    targetPwmLeft  = -pwm;
+    targetPwmRight =  pwm;
   }
   rotateState     = ROT_TURNING;
   rotateTarget    = targetDeg;
@@ -418,23 +579,23 @@ void stepAutoNav() {
         stopCar();
         autoState = AUTO_SCAN;
         autoActionTimer = now;
-        radarServo.attach(SERVO_PIN, 500, 2400);
+        setRadarServo(150);
       }
       break;
 
     case AUTO_SCAN:
       // Sweep Left (150 deg) then Right (30 deg)
-      radarServo.write(150);
+      setRadarServo(150);
       delay(220);
       invalidateSonarCache();
       scanDistLeft = readUltrasonicCM();
 
-      radarServo.write(30);
+      setRadarServo(30);
       delay(240);
       invalidateSonarCache();
       scanDistRight = readUltrasonicCM();
 
-      radarServo.write(90);
+      setRadarServo(90);
       delay(180);
       radarServo.detach();
 
@@ -535,8 +696,8 @@ void handleWsMessage(WiFiClient& client, const String& msg) {
   }
   // --- EMERGENCY STOP ---
   else if (msg.indexOf("\"type\":\"stop\"") >= 0) {
-    carStopped = true;
-    autoState  = AUTO_STOPPED;
+    carStopped  = true;
+    autoState   = AUTO_STOPPED;
     rotateState = ROT_IDLE;
     stopCar();
     broadcastWsText("{\"type\":\"stopped\"}");
@@ -544,6 +705,7 @@ void handleWsMessage(WiFiClient& client, const String& msg) {
   // --- RESUME / START ---
   else if (msg.indexOf("\"type\":\"start\"") >= 0) {
     carStopped = false;
+    if (!manualMode) autoState = AUTO_FORWARD;
     broadcastWsText("{\"type\":\"started\"}");
   }
   // --- MODE SWITCH (MANUAL / AUTO) ---
@@ -567,7 +729,7 @@ void handleWsMessage(WiFiClient& client, const String& msg) {
     else if (msg.indexOf("\"dir\":\"right\"") >= 0) startNonBlockingRotate(90.0f,  true);
     else if (msg.indexOf("\"dir\":\"360\"")   >= 0) startNonBlockingRotate(360.0f, true);
   }
-  // --- GYRO CALIBRATION (NEW) ---
+  // --- GYRO CALIBRATION ---
   else if (msg.indexOf("\"type\":\"calibrate_gyro\"") >= 0 || msg.indexOf("\"type\":\"zero_gyro\"") >= 0) {
     if (mpuAvailable) {
       calibrateGyro();
@@ -575,6 +737,23 @@ void handleWsMessage(WiFiClient& client, const String& msg) {
     } else {
       broadcastWsText("{\"type\":\"gyro_calibrated\",\"success\":false,\"error\":\"MPU6050 not detected\"}");
     }
+  }
+  // --- MANUAL SERVO HEAD CONTROLS (< SCAN >) ---
+  else if (msg.indexOf("\"type\":\"servo\"") >= 0) {
+    int angIdx = msg.indexOf("\"angle\":");
+    if (angIdx >= 0) {
+      int angle = msg.substring(angIdx + 8).toInt();
+      angle = constrain(angle, 0, 180);
+      radarState = SCAN_IDLE;
+      setRadarServo(angle);
+      invalidateSonarCache();
+      long dist = readUltrasonicCM();
+      broadcastWsText("{\"type\":\"servo\",\"angle\":" + String(angle) + ",\"distance\":" + String(dist) + "}");
+    }
+  }
+  // --- RADAR SCAN SWEEP ---
+  else if (msg.indexOf("\"type\":\"scan\"") >= 0) {
+    startRadarScan();
   }
   // --- LED PATTERN ---
   else if (msg.indexOf("\"type\":\"led\"") >= 0) {
@@ -585,15 +764,6 @@ void handleWsMessage(WiFiClient& client, const String& msg) {
     lastLedUpdateMs = millis();
     updateLEDs();
   }
-  // --- RADAR SCAN ---
-  else if (msg.indexOf("\"type\":\"scan\"") >= 0) {
-    radarState        = SCAN_RUNNING;
-    radarCurrentAngle = -90;
-    radarStepDir      = 1;
-    invalidateSonarCache();
-    radarServo.attach(SERVO_PIN, 500, 2400);
-    lastRadarStepMs = millis();
-  }
   // --- PING ---
   else if (msg.indexOf("\"type\":\"ping\"") >= 0) {
     sendWsFrame(client, "{\"type\":\"pong\",\"time\":" + String(millis()) + "}");
@@ -601,7 +771,6 @@ void handleWsMessage(WiFiClient& client, const String& msg) {
 }
 
 void pollWebSocketServer() {
-  // Accept new clients
   if (wsServer.hasClient()) {
     WiFiClient newClient = wsServer.available();
     int slot = -1;
@@ -615,13 +784,11 @@ void pollWebSocketServer() {
     }
   }
 
-  // Poll existing clients
   for (int i = 0; i < MAX_WS_CLIENTS; i++) {
     if (!wsClients[i] || !wsClients[i].connected()) continue;
     WiFiClient& client = wsClients[i];
 
     if (client.available()) {
-      // Check for HTTP Upgrade handshake
       String req = "";
       unsigned long t0 = millis();
       while (client.available() && (millis() - t0 < 50)) {
@@ -641,7 +808,6 @@ void pollWebSocketServer() {
                        "Sec-WebSocket-Accept: " + accept + "\r\n\r\n");
         }
       } else if (req.length() >= 2) {
-        // Parse RFC 6455 Frame
         uint8_t b0 = (uint8_t)req[0];
         uint8_t b1 = (uint8_t)req[1];
         uint8_t opcode = b0 & 0x0F;
@@ -675,14 +841,176 @@ void pollWebSocketServer() {
 }
 
 // ===================================================================================
-// 8. REST API & WI-FI HANDLERS
+// 8. WI-FI STA NETWORK MANAGER & PROFILES
 // ===================================================================================
+String getWifiProfilesJson() {
+  String   json  = "{\"selected\":" + String(activeWifiIndex) + ",\"networks\":[";
+  uint8_t  count = nvsPrefs.getUChar("cnt", 0);
+  bool     first = true;
+  for (uint8_t i = 0; i < count && i < MAX_WIFI_PROFILES; i++) {
+    String s = nvsPrefs.getString((String("s") + i).c_str(), "");
+    if (s.length() == 0) continue;
+    if (!first) json += ",";
+    first = false;
+    json += "{\"ssid\":\"" + s + "\"}";
+  }
+  json += "]}";
+  return json;
+}
+
 void setCorsHeaders() {
   restServer.sendHeader("Access-Control-Allow-Origin", "*");
   restServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   restServer.sendHeader("Access-Control-Allow-Headers", "*");
 }
 
+void handleWifiScan() {
+  setCorsHeaders();
+  if (!wifiScanPending) {
+    WiFi.scanNetworks(true, true); // Async scan, include hidden networks
+    wifiScanPending   = true;
+    wifiScanStartedMs = millis();
+    restServer.send(202, "application/json", "{\"status\":\"scanning\"}");
+    return;
+  }
+  int count = WiFi.scanComplete();
+  if (count == WIFI_SCAN_RUNNING) {
+    if (millis() - wifiScanStartedMs > 8000) {
+      wifiScanPending = false;
+      WiFi.scanDelete();
+      restServer.send(504, "application/json", "{\"error\":\"scan_timeout\"}");
+      return;
+    }
+    restServer.send(202, "application/json", "{\"status\":\"scanning\"}");
+    return;
+  }
+  wifiScanPending = false;
+  String out = "{\"networks\":[";
+  if (count > 0) {
+    for (int i = 0; i < count; i++) {
+      if (i) out += ",";
+      String ssid = WiFi.SSID(i);
+      ssid.replace("\"", "\\\"");
+      out += "{\"ssid\":\"" + ssid + "\",\"rssi\":" + String(WiFi.RSSI(i))
+           + ",\"secure\":" + String(WiFi.encryptionType(i) != WIFI_AUTH_OPEN ? 1 : 0) + "}";
+    }
+  }
+  out += "]}";
+  WiFi.scanDelete();
+  restServer.send(200, "application/json", out);
+}
+
+void handleWifiSaved() {
+  setCorsHeaders();
+  restServer.send(200, "application/json", getWifiProfilesJson());
+}
+
+void handleWifiSave() {
+  setCorsHeaders();
+  if (!restServer.hasArg("ssid") || !restServer.hasArg("password")) {
+    restServer.send(400, "text/plain", "Missing ssid or password");
+    return;
+  }
+  String  ssid  = restServer.arg("ssid");
+  String  pass  = restServer.arg("password");
+  uint8_t count = nvsPrefs.getUChar("cnt", 0);
+  int     foundSlot = -1;
+
+  for (uint8_t i = 0; i < count; i++) {
+    if (nvsPrefs.getString((String("s") + i).c_str(), "") == ssid) { foundSlot = i; break; }
+  }
+  if (foundSlot < 0) {
+    if (count >= MAX_WIFI_PROFILES) { restServer.send(409, "text/plain", "Saved profiles limit reached"); return; }
+    foundSlot = count++;
+  }
+  nvsPrefs.putString((String("s") + foundSlot).c_str(), ssid);
+  nvsPrefs.putString((String("p") + foundSlot).c_str(), pass);
+  nvsPrefs.putUChar("cnt", count);
+  if (activeWifiIndex < 0) { activeWifiIndex = foundSlot; nvsPrefs.putInt("sel", activeWifiIndex); }
+  restServer.send(200, "application/json", getWifiProfilesJson());
+}
+
+void handleWifiSelect() {
+  setCorsHeaders();
+  if (!restServer.hasArg("index")) { restServer.send(400, "text/plain", "Missing index"); return; }
+  int idx = restServer.arg("index").toInt();
+  uint8_t count = nvsPrefs.getUChar("cnt", 0);
+  if (idx < 0 || idx >= count) { restServer.send(400, "text/plain", "Invalid index"); return; }
+  activeWifiIndex = idx;
+  nvsPrefs.putInt("sel", idx);
+  restServer.send(200, "application/json", getWifiProfilesJson());
+}
+
+void handleWifiDelete() {
+  setCorsHeaders();
+  if (!restServer.hasArg("index")) { restServer.send(400, "text/plain", "Missing index"); return; }
+  int     idx   = restServer.arg("index").toInt();
+  uint8_t count = nvsPrefs.getUChar("cnt", 0);
+  if (idx < 0 || idx >= count) { restServer.send(400, "text/plain", "Invalid index"); return; }
+  for (int i = idx; i < count - 1; i++) {
+    nvsPrefs.putString((String("s") + i).c_str(), nvsPrefs.getString((String("s") + (i + 1)).c_str(), ""));
+    nvsPrefs.putString((String("p") + i).c_str(), nvsPrefs.getString((String("p") + (i + 1)).c_str(), ""));
+  }
+  nvsPrefs.remove((String("s") + (count - 1)).c_str());
+  nvsPrefs.remove((String("p") + (count - 1)).c_str());
+  count--;
+  nvsPrefs.putUChar("cnt", count);
+  if (activeWifiIndex >= count) activeWifiIndex = (count > 0) ? 0 : -1;
+  nvsPrefs.putInt("sel", activeWifiIndex);
+  restServer.send(200, "application/json", getWifiProfilesJson());
+}
+
+void handleSwitchSTA() {
+  setCorsHeaders();
+  uint8_t count = nvsPrefs.getUChar("cnt", 0);
+  if (count == 0 || activeWifiIndex < 0 || activeWifiIndex >= count) {
+    restServer.send(400, "text/plain", "No selected saved network");
+    return;
+  }
+  pendingStaSsid    = nvsPrefs.getString((String("s") + activeWifiIndex).c_str(), "");
+  pendingStaPass    = nvsPrefs.getString((String("p") + activeWifiIndex).c_str(), "");
+  pendingStaConnect = true;
+  pendingStaDelay   = millis() + 200; // Allow HTTP response to flush
+  restServer.send(200, "application/json",
+    "{\"status\":\"connecting\",\"ssid\":\"" + pendingStaSsid
+    + "\",\"host\":\"http://novax.local\"}");
+}
+
+void handleSwitchAP() {
+  setCorsHeaders();
+  restServer.send(200, "application/json", "{\"status\":\"switched\",\"mode\":\"AP\",\"ip\":\"192.168.4.1\"}");
+  delay(120);
+  pendingStaConnect = false;
+  WiFi.disconnect(true, true);
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP(AP_DEFAULT_SSID, AP_DEFAULT_PASS);
+  Serial.printf("[WIFI] Switched to AP mode. IP: %s\n", WiFi.softAPIP().toString().c_str());
+}
+
+void processPendingStaConnect() {
+  if (!pendingStaConnect || millis() < pendingStaDelay) return;
+  pendingStaConnect = false;
+
+  Serial.printf("[WIFI] Connecting to Station SSID: %s\n", pendingStaSsid.c_str());
+  WiFi.begin(pendingStaSsid.c_str(), pendingStaPass.c_str());
+
+  unsigned long t = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t < 10000) delay(100);
+
+  if (WiFi.status() == WL_CONNECTED) {
+    MDNS.end();
+    MDNS.begin("novax");
+    Serial.printf("[WIFI] STA connected! IP: %s\n", WiFi.localIP().toString().c_str());
+    broadcastWsText("{\"type\":\"wifi\",\"mode\":\"STA\",\"ip\":\"" + WiFi.localIP().toString() + "\"}");
+  } else {
+    Serial.println("[WIFI] STA connect timed out — maintaining AP.");
+    broadcastWsText("{\"type\":\"wifi\",\"mode\":\"AP\",\"ip\":\"192.168.4.1\",\"error\":\"sta_failed\"}");
+  }
+}
+
+// ===================================================================================
+// 9. REST API & OTA HANDLERS
+// ===================================================================================
 bool isOtaAuthorized() {
   if (!restServer.hasHeader("X-NovaX-OTA")) return true; // Open in local AP mode
   return (restServer.header("X-NovaX-OTA") == OTA_DEFAULT_TOKEN);
@@ -691,8 +1019,8 @@ bool isOtaAuthorized() {
 void handleStatus() {
   setCorsHeaders();
   long   d       = readUltrasonicCM();
-  String wifiMode = (WiFi.getMode() == WIFI_AP ? "AP" : "STA");
-  String ip      = (WiFi.getMode() == WIFI_AP ? WiFi.softAPIP().toString() : WiFi.localIP().toString());
+  String wifiMode = (WiFi.getMode() == WIFI_AP ? "AP" : (WiFi.status() == WL_CONNECTED ? "STA" : "AP_STA"));
+  String ip      = (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString());
   String s = "{";
   s += "\"distance\":"   + String(d)    + ",";
   s += "\"mode\":\""     + String(manualMode ? "manual" : "auto") + "\",";
@@ -870,9 +1198,12 @@ void handleOtaFinish() {
 }
 
 // ===================================================================================
-// 9. SETUP & ROUTES
+// 10. SETUP & ROUTES
 // ===================================================================================
 void setup() {
+  // Disable aggressive brownout detector to prevent motor inrush resets
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+
   Serial.begin(115200);
   delay(200);
   Serial.println("\n[NovaX V2 - Pure Car Edition] Initializing...");
@@ -883,12 +1214,13 @@ void setup() {
   nvsPrefs.begin("wifi", false);
   activeWifiIndex = nvsPrefs.getInt("sel", -1);
 
+  // Use AP_STA mode so the car AP remains accessible while scanning or connecting to home Wi-Fi
+  WiFi.mode(WIFI_AP_STA);
   WiFi.setHostname("novax");
-  WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_DEFAULT_SSID, AP_DEFAULT_PASS);
   MDNS.begin("novax");
 
-  Serial.printf("[WIFI] AP Mode | SSID: %s | IP: %s\n",
+  Serial.printf("[WIFI] AP Mode Ready | SSID: %s | IP: %s\n",
                 AP_DEFAULT_SSID, WiFi.softAPIP().toString().c_str());
 
   // Web Flasher & Status Routes
@@ -905,6 +1237,20 @@ void setup() {
   restServer.on("/ota/status", HTTP_GET,  handleFirmwareInfo);
   restServer.on("/ota/update", HTTP_POST, handleOtaFinish, handleOtaUpload);
   restServer.on("/update",     HTTP_POST, handleOtaFinish, handleOtaUpload);
+
+  // Wi-Fi Network Management Endpoints (Used by Cockpit Network Manager)
+  restServer.on("/wifi/scan",      HTTP_GET,  handleWifiScan);
+  restServer.on("/wifi/saved",     HTTP_GET,  handleWifiSaved);
+  restServer.on("/wifi/save",      HTTP_POST, handleWifiSave);
+  restServer.on("/wifi/save",      HTTP_GET,  handleWifiSave);
+  restServer.on("/wifi/select",    HTTP_POST, handleWifiSelect);
+  restServer.on("/wifi/select",    HTTP_GET,  handleWifiSelect);
+  restServer.on("/wifi/delete",    HTTP_POST, handleWifiDelete);
+  restServer.on("/wifi/delete",    HTTP_GET,  handleWifiDelete);
+  restServer.on("/wifi/switchSta", HTTP_POST, handleSwitchSTA);
+  restServer.on("/wifi/switchSta", HTTP_GET,  handleSwitchSTA);
+  restServer.on("/wifi/switchAp",  HTTP_POST, handleSwitchAP);
+  restServer.on("/wifi/switchAp",  HTTP_GET,  handleSwitchAP);
 
   // Gyro Calibration (REST)
   restServer.on("/calibrate_gyro", HTTP_POST, []() {
@@ -926,7 +1272,42 @@ void setup() {
     }
   });
 
-  // Basic REST Driving Control Routes
+  // Servo Head Control (REST)
+  restServer.on("/servo", HTTP_GET, []() {
+    setCorsHeaders();
+    if (!restServer.hasArg("angle")) { restServer.send(400, "text/plain", "Missing angle"); return; }
+    int angle = constrain(restServer.arg("angle").toInt(), 0, 180);
+    radarState = SCAN_IDLE;
+    setRadarServo(angle);
+    invalidateSonarCache();
+    long dist = readUltrasonicCM();
+    restServer.send(200, "application/json",
+      "{\"status\":\"ok\",\"angle\":" + String(angle) + ",\"distance\":" + String(dist) + "}");
+  });
+
+  // Radar Sweeper Trigger & Results (REST)
+  restServer.on("/scan", HTTP_GET, []() {
+    setCorsHeaders();
+    startRadarScan();
+    restServer.send(200, "application/json", "{\"status\":\"scanning\"}");
+  });
+  restServer.on("/scan", HTTP_POST, []() {
+    setCorsHeaders();
+    startRadarScan();
+    restServer.send(200, "application/json", "{\"status\":\"scanning\"}");
+  });
+  restServer.on("/scanResult", HTTP_GET, []() {
+    setCorsHeaders();
+    String res = "{\"status\":\""
+      + String(radarState == SCAN_DONE ? "done" : radarState == SCAN_RUNNING ? "scanning" : "idle") + "\"";
+    res += ",\"left\":"  + String(scanDistLeft);
+    res += ",\"front\":" + String(scanDistFront);
+    res += ",\"right\":" + String(scanDistRight);
+    res += "}";
+    restServer.send(200, "application/json", res);
+  });
+
+  // Basic Driving Control (REST)
   restServer.on("/stop", HTTP_POST, []() {
     setCorsHeaders();
     carStopped = true;
@@ -936,6 +1317,7 @@ void setup() {
   restServer.on("/start", HTTP_POST, []() {
     setCorsHeaders();
     carStopped = false;
+    if (!manualMode) autoState = AUTO_FORWARD;
     restServer.send(200, "application/json", "{\"status\":\"started\"}");
   });
   restServer.on("/mode", HTTP_GET, []() {
@@ -943,17 +1325,46 @@ void setup() {
     if (restServer.hasArg("val")) {
       manualMode = (restServer.arg("val") != "auto");
       autoState  = manualMode ? AUTO_STOPPED : AUTO_FORWARD;
+    } else if (restServer.hasArg("set")) {
+      manualMode = (restServer.arg("set") != "auto");
+      autoState  = manualMode ? AUTO_STOPPED : AUTO_FORWARD;
     }
     restServer.send(200, "application/json", "{\"mode\":\"" + String(manualMode ? "manual" : "auto") + "\"}");
   });
+  restServer.on("/move", HTTP_GET, []() {
+    setCorsHeaders();
+    if (!manualMode || carStopped) { restServer.send(200, "application/json", "{\"status\":\"blocked\"}"); return; }
+    if (!restServer.hasArg("d")) { restServer.send(400, "text/plain", "Missing d"); return; }
+    char dir = restServer.arg("d").charAt(0);
+    int  spd = restServer.hasArg("speed") ? restServer.arg("speed").toInt() : CRUISE_SPEED_PWM;
+    float spdNorm = (float)spd / 255.0f;
+    if      (dir == 'F') motorMix( 0.0f,  spdNorm);
+    else if (dir == 'B') motorMix( 0.0f, -spdNorm);
+    else if (dir == 'L') motorMix(-spdNorm, 0.0f);
+    else if (dir == 'R') motorMix( spdNorm, 0.0f);
+    else if (dir == 'S') stopCar();
+    restServer.send(200, "application/json", "{\"status\":\"ok\"}");
+  });
 
+  // CORS Preflight Options handler
+  restServer.onNotFound([]() {
+    if (restServer.method() == HTTP_OPTIONS) {
+      setCorsHeaders();
+      restServer.send(204);
+    } else {
+      restServer.send(404, "text/plain", "Not found");
+    }
+  });
+
+  const char* headerKeys[] = {"X-NovaX-OTA"};
+  restServer.collectHeaders(headerKeys, 1);
   restServer.begin();
+
   wsServer.begin();
   wsServer.setNoDelay(true);
 
   // Centre radar servo at boot
-  radarServo.attach(SERVO_PIN, 500, 2400);
-  radarServo.write(90);
+  setRadarServo(90);
   delay(200);
   radarServo.detach();
 
@@ -962,19 +1373,23 @@ void setup() {
   autoState   = AUTO_STOPPED;
   stopCar();
 
-  Serial.printf("[NovaX V2] Ready | FW %s | IMU: %s\n",
+  Serial.printf("[NovaX V2] Ready | FW %s | IMU: %s (0x%02X)\n",
     FIRMWARE_VERSION,
-    mpuAvailable ? "MPU6050" : "None");
+    mpuAvailable ? "MPU6050" : "None",
+    mpuI2cAddress);
 }
 
 // ===================================================================================
-// 10. MAIN LOOP
+// 11. MAIN LOOP
 // ===================================================================================
 void loop() {
   restServer.handleClient();
   pollWebSocketServer();
+  processPendingStaConnect();
   updateGyroHeading();
   stepNonBlockingRotate();
+  stepMotorRamp();
+  stepRadarScan();
   updateLEDs();
 
   if (!manualMode) {
@@ -992,8 +1407,8 @@ void loop() {
   if (millis() - lastTelems >= 100) {
     lastTelems = millis();
     long   d        = readUltrasonicCM();
-    String wifiMode = (WiFi.getMode() == WIFI_AP ? "AP" : "STA");
-    String ip       = (WiFi.getMode() == WIFI_AP ? WiFi.softAPIP().toString() : WiFi.localIP().toString());
+    String wifiMode = (WiFi.status() == WL_CONNECTED ? "STA" : "AP");
+    String ip       = (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString());
     String telem = "{\"type\":\"telemetry\",";
     telem += "\"distance\":"   + String(d)              + ",";
     telem += "\"heading\":"    + String(yawHeading, 1)  + ",";
