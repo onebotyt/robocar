@@ -128,9 +128,9 @@
 // ===================================================================================
 // 2. CONSTANTS & SYSTEM CONFIGURATION
 // ===================================================================================
-const char* FIRMWARE_VERSION  = "2.4.48";
+const char* FIRMWARE_VERSION  = "2.4.49";
 const char* HARDWARE_VERSION  = "ESP32-V2";
-const char* BUILD_DATE        = "2026-09-26";
+const char* BUILD_DATE        = "2026-09-28";
 const char* AP_DEFAULT_SSID   = "NovaX-Car";
 const char* AP_DEFAULT_PASS   = "12345678";
 const char* OTA_DEFAULT_TOKEN = "NovaX-OTA-ChangeMe";
