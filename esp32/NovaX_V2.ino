@@ -409,7 +409,7 @@ void initMPU() {
   // Configure internal pullups on I2C lines
   pinMode(MPU_SDA, INPUT_PULLUP);
   pinMode(MPU_SCL, INPUT_PULLUP);
-  delay(10);
+  delay(80); // Allow 5V booster rail to settle
 
   // Unwedge stuck I2C bus if slave held SDA low
   pinMode(MPU_SCL, OUTPUT);
@@ -420,44 +420,49 @@ void initMPU() {
     delayMicroseconds(5);
   }
   pinMode(MPU_SCL, INPUT_PULLUP);
-  delay(10);
+  delay(15);
 
   Wire.begin(MPU_SDA, MPU_SCL, 100000);
   Wire.setTimeOut(50); // Prevent bus lockup from stalling main loop
 
-  // Probe both standard MPU addresses (0x68 when AD0=GND, 0x69 when AD0=VCC/Floating)
-  uint8_t targetAddr = 0;
-  Wire.beginTransmission(0x68);
-  if (Wire.endTransmission() == 0) {
-    targetAddr = 0x68;
-  } else {
-    Wire.beginTransmission(0x69);
-    if (Wire.endTransmission() == 0) {
-      targetAddr = 0x69;
+  // Both standard MPU6050 addresses:
+  // 0x68 (when AD0 is connected to GND)
+  // 0x69 (when AD0 is connected to 5V/3.3V or floating with internal pull-up)
+  const uint8_t TARGET_ADDRS[] = { 0x68, 0x69 };
+
+  for (int attempt = 1; attempt <= 3; attempt++) {
+    for (int i = 0; i < 2; i++) {
+      uint8_t addr = TARGET_ADDRS[i];
+      Serial.printf("[MPU6050] Probing address 0x%02X (attempt %d)...\n", addr, attempt);
+
+      Wire.beginTransmission(addr);
+      byte err = Wire.endTransmission();
+      if (err == 0) {
+        Serial.printf("[MPU6050] Responding at address 0x%02X! Calling mpu.begin()...\n", addr);
+        if (mpu.begin(addr, &Wire)) {
+          mpuI2cAddress = addr;
+          mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+          mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+          mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+          calibrateGyro();
+          mpuAvailable = true;
+          Serial.printf("[MPU6050] Succeeded on address 0x%02X! Calibrated & Ready.\n", addr);
+          return;
+        } else {
+          Serial.printf("[MPU6050] ACK at 0x%02X but mpu.begin() failed. Trying alternate address...\n", addr);
+        }
+      }
     }
+    delay(60);
   }
 
-  if (targetAddr != 0) {
-    Serial.printf("[MPU6050] Responding at address 0x%02X\n", targetAddr);
-    if (mpu.begin(targetAddr, &Wire)) {
-      mpuI2cAddress = targetAddr;
-      mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
-      mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-      mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-      calibrateGyro();
-      mpuAvailable = true;
-      Serial.printf("[MPU6050] Initialized and calibrated at 0x%02X.\n", targetAddr);
-      return;
-    }
-  }
-
-  // Fallback: Scan full 7-bit I2C bus for diagnostics
-  Serial.println("[MPU6050] Probing all I2C addresses (0x01..0x7F)...");
+  // Fallback: Scan full 7-bit I2C bus in case module is at another address
+  Serial.println("[MPU6050] Neither 0x68 nor 0x69 responded. Scanning entire I2C bus (0x01..0x7F)...");
   int found = 0;
   for (uint8_t a = 1; a < 127; a++) {
     Wire.beginTransmission(a);
     if (Wire.endTransmission() == 0) {
-      Serial.printf("[I2C] Found device at 0x%02X\n", a);
+      Serial.printf("[I2C] Found responding device at 0x%02X\n", a);
       found++;
       if (mpu.begin(a, &Wire)) {
         mpuI2cAddress = a;
@@ -466,7 +471,7 @@ void initMPU() {
         mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
         calibrateGyro();
         mpuAvailable = true;
-        Serial.printf("[MPU6050] Initialized at 0x%02X!\n", a);
+        Serial.printf("[MPU6050] Initialized at fallback address 0x%02X!\n", a);
         return;
       }
     }
@@ -475,7 +480,8 @@ void initMPU() {
   mpuAvailable = false;
   Serial.println("[MPU6050] Not detected on I2C bus.");
   if (found == 0) {
-    Serial.println("[MPU6050] Check wiring: VCC->3.3V/5V, GND->GND, SDA->21, SCL->22, AD0->GND.");
+    Serial.println("[MPU6050] Check wiring: VCC->5V Booster, GND->GND, SDA->21, SCL->22.");
+    Serial.println("[MPU6050] If AD0 is floating or pulled HIGH, address is 0x69. If AD0 is GND, address is 0x68.");
   }
 }
 
