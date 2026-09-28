@@ -18,6 +18,13 @@
 #include <mbedtls/sha1.h>
 #include <mbedtls/base64.h>
 
+// mbedtls 3.x removed the _ret suffix — provide compatibility macros
+#if !defined(MBEDTLS_DEPRECATED_REMOVED) && !defined(mbedtls_sha1_starts_ret)
+  #define mbedtls_sha1_starts_ret(ctx)               mbedtls_sha1_starts((ctx))
+  #define mbedtls_sha1_update_ret(ctx, input, ilen)   mbedtls_sha1_update((ctx), (input), (ilen))
+  #define mbedtls_sha1_finish_ret(ctx, output)        mbedtls_sha1_finish((ctx), (output))
+#endif
+
 // ===================================================================================
 // 1. FINALIZED ESP32 V2 GPIO MAPPING — PURE CAR (CUSTOM HARDWARE LAYOUT)
 // ===================================================================================
