@@ -1,5 +1,5 @@
 {
-  "version": "2.4.55",
+  "version": "2.4.56",
   "buildDate": "2026-09-28",
   "target": "ESP32-WROOM-32",
   "binFile": "NovaX-Firmware.bin",

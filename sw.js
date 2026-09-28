@@ -1,4 +1,4 @@
-const CACHE_NAME = 'novax-cache-v2.4.55';
+const CACHE_NAME = 'novax-cache-v2.4.56';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
