@@ -18,12 +18,6 @@
 #include <mbedtls/sha1.h>
 #include <mbedtls/base64.h>
 
-// mbedtls 3.x removed the _ret suffix — provide compatibility macros
-#if !defined(MBEDTLS_DEPRECATED_REMOVED) && !defined(mbedtls_sha1_starts_ret)
-  #define mbedtls_sha1_starts_ret(ctx)               mbedtls_sha1_starts((ctx))
-  #define mbedtls_sha1_update_ret(ctx, input, ilen)   mbedtls_sha1_update((ctx), (input), (ilen))
-  #define mbedtls_sha1_finish_ret(ctx, output)        mbedtls_sha1_finish((ctx), (output))
-#endif
 
 // ===================================================================================
 // 1. FINALIZED ESP32 V2 GPIO MAPPING — PURE CAR (CUSTOM HARDWARE LAYOUT)
@@ -475,9 +469,9 @@ String computeWsAccept(const String& clientKey) {
   unsigned char sha1Result[20];
   mbedtls_sha1_context shaCtx;
   mbedtls_sha1_init(&shaCtx);
-  mbedtls_sha1_starts_ret(&shaCtx);
-  mbedtls_sha1_update_ret(&shaCtx, (const unsigned char*)combined.c_str(), combined.length());
-  mbedtls_sha1_finish_ret(&shaCtx, sha1Result);
+  mbedtls_sha1_starts(&shaCtx);
+  mbedtls_sha1_update(&shaCtx, (const unsigned char*)combined.c_str(), combined.length());
+  mbedtls_sha1_finish(&shaCtx, sha1Result);
   mbedtls_sha1_free(&shaCtx);
 
   unsigned char base64Buf[40];
