@@ -166,9 +166,11 @@ volatile bool motorRunning = false;
 volatile bool manualMode   = true;
 volatile bool carStopped   = false;
 // MPU6050 Heading & Gyro State
-bool          mpuAvailable  = false;
-float         gyroZBias     = 0.0f;
-float         yawHeading    = 0.0f;
+bool          mpuAvailable   = false;
+float         gyroZBias      = 0.0f;
+float         yawHeading     = 0.0f;
+float         pitchAngle     = 0.0f;
+float         rollAngle      = 0.0f;
 unsigned long lastGyroMicros = 0;
 // Camera State
 #if ENABLE_CAMERA
@@ -302,18 +304,22 @@ void invalidateSonarCache() {
 // 5. MPU6050 GYROSCOPE & HEADING INTEGRATION
 // ===================================================================================
 void calibrateGyro() {
-  delay(200);
+  stopCar();
+  delay(100);
   float sumZ  = 0;
-  int samples = 300;
+  int samples = 250;
   for (int i = 0; i < samples; i++) {
     sensors_event_t a, g, temp;
     mpu.getEvent(&a, &g, &temp);
     sumZ += g.gyro.z;
     delay(2);
   }
-  gyroZBias    = sumZ / (float)samples;
-  yawHeading   = 0.0f;
+  gyroZBias      = sumZ / (float)samples;
+  yawHeading     = 0.0f;
+  pitchAngle     = 0.0f;
+  rollAngle      = 0.0f;
   lastGyroMicros = micros();
+  Serial.printf("[MPU6050] Calibrated. Zero bias: %.4f rad/s\n", gyroZBias);
 }
 void initMPU() {
   Wire.begin(MPU_SDA, MPU_SCL, 100000);
@@ -341,6 +347,17 @@ void updateGyroHeading() {
   yawHeading += rateZ * 57.2957795f * dt;
   while (yawHeading <    0.0f) yawHeading += 360.0f;
   while (yawHeading >= 360.0f) yawHeading -= 360.0f;
+
+  // Accelerometer Pitch & Roll (in degrees)
+  float ax = a.acceleration.x;
+  float ay = a.acceleration.y;
+  float az = a.acceleration.z;
+  float rawPitch = atan2(ay, sqrt(ax * ax + az * az)) * 57.2957795f;
+  float rawRoll  = atan2(-ax, az) * 57.2957795f;
+
+  // Low-pass smooth filter
+  pitchAngle = pitchAngle * 0.85f + rawPitch * 0.15f;
+  rollAngle  = rollAngle  * 0.85f + rawRoll  * 0.15f;
 }
 // [A14] Non-blocking rotate — called every loop() tick while ROT_TURNING
 void startNonBlockingRotate(float targetDeg, bool turnRight) {
@@ -796,6 +813,15 @@ void handleWsMessage(WiFiClient& client, const String& msg) {
     else if (msg.indexOf("\"dir\":\"right\"") >= 0) startNonBlockingRotate(90.0f,  true);
     else if (msg.indexOf("\"dir\":\"360\"")   >= 0) startNonBlockingRotate(360.0f, true);
   }
+  // --- GYRO CALIBRATION ---
+  else if (msg.indexOf("\"type\":\"calibrate_gyro\"") >= 0 || msg.indexOf("\"type\":\"zero_gyro\"") >= 0) {
+    if (mpuAvailable) {
+      calibrateGyro();
+      broadcastWsText("{\"type\":\"gyro_calibrated\",\"success\":true,\"heading\":0.0,\"pitch\":0.0,\"roll\":0.0}");
+    } else {
+      broadcastWsText("{\"type\":\"gyro_calibrated\",\"success\":false,\"error\":\"MPU6050 not detected\"}");
+    }
+  }
   // --- LED EFFECT ---
   else if (msg.indexOf("\"type\":\"led\"") >= 0) {
     if (msg.indexOf("\"pattern\":\"blink\"") >= 0) currentLedEffect = "blink";
@@ -1139,6 +1165,10 @@ void handleStatus() {
   s += "\"manual\":"    + String(manualMode ? 1 : 0) + ",";
   s += "\"stopped\":"   + String((carStopped || autoState == AUTO_STOPPED) ? 1 : 0) + ",";
   s += "\"yaw\":"       + String(yawHeading, 1) + ",";
+  s += "\"heading\":"   + String(yawHeading, 1) + ",";
+  s += "\"pitch\":"     + String(pitchAngle, 1) + ",";
+  s += "\"roll\":"      + String(rollAngle, 1)  + ",";
+  s += "\"imu\":\""     + String(mpuAvailable ? "MPU6050" : "None") + "\",";
   s += "\"camera\":"    + String(cameraAvailable ? 1 : 0) + ",";
   s += "\"wifiMode\":\"" + wifiMode + "\",";
   s += "\"ip\":\""      + ip + "\",";
@@ -1478,6 +1508,24 @@ void setup() {
   restServer.on("/firmware",       HTTP_GET,  handleFirmwareInfo);
   restServer.on("/status",         HTTP_GET,  handleStatus);
   restServer.on("/path",           HTTP_POST, handlePathUpload);
+  restServer.on("/calibrate_gyro", HTTP_POST, []() {
+    setCorsHeaders();
+    if (mpuAvailable) {
+      calibrateGyro();
+      restServer.send(200, "application/json", "{\"status\":\"ok\",\"calibrated\":true,\"heading\":0.0,\"pitch\":0.0,\"roll\":0.0}");
+    } else {
+      restServer.send(503, "application/json", "{\"status\":\"error\",\"message\":\"MPU6050 not detected\"}");
+    }
+  });
+  restServer.on("/calibrate_gyro", HTTP_GET, []() {
+    setCorsHeaders();
+    if (mpuAvailable) {
+      calibrateGyro();
+      restServer.send(200, "application/json", "{\"status\":\"ok\",\"calibrated\":true,\"heading\":0.0,\"pitch\":0.0,\"roll\":0.0}");
+    } else {
+      restServer.send(503, "application/json", "{\"status\":\"error\",\"message\":\"MPU6050 not detected\"}");
+    }
+  });
   restServer.on("/cam.jpg",        HTTP_GET,  handleCameraSnapshot);
   restServer.on("/cam.bmp",        HTTP_GET,  handleCameraBmp);
   restServer.on("/ota/status",     HTTP_GET,  handleFirmwareInfo);
@@ -1641,6 +1689,8 @@ void loop() {
     String telem = "{\"type\":\"telemetry\",";
     telem += "\"distance\":"  + String(d)              + ",";
     telem += "\"heading\":"   + String(yawHeading, 1)  + ",";
+    telem += "\"pitch\":"     + String(pitchAngle, 1)  + ",";
+    telem += "\"roll\":"      + String(rollAngle, 1)   + ",";
     telem += "\"mode\":\""    + String(manualMode ? "manual" : "auto") + "\",";
     telem += "\"stopped\":"   + String(carStopped ? "true" : "false") + ",";
     telem += "\"rotating\":"  + String(rotateState == ROT_TURNING ? "true" : "false") + ",";

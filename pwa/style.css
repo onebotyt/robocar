@@ -465,11 +465,12 @@ html, body {
   font-size: 0.72rem;
 }
 
-/* ================= 2. CENTER CARD: NOVA X (LIVE CAM & CONTROLS) ================= */
+/* ================= 2. CENTER CARD: NOVA X (MASTER CONTROLS & LEDS) ================= */
 .card-center {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
+  gap: 6px;
 }
 
 .card-hero-title {
@@ -478,42 +479,6 @@ html, body {
   font-weight: 800;
   letter-spacing: 1.2px;
   color: #ffffff;
-}
-
-/* Center Live Camera Container */
-.center-cam-wrapper {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 2px 0;
-  flex: 1;
-  justify-content: center;
-  min-height: 0;
-}
-
-.center-cam-wrapper .cam-feed-container {
-  width: 100%;
-  aspect-ratio: 16 / 10;
-  min-height: 0;
-  max-height: 120px;
-  background: #02070d;
-  border-radius: 8px;
-  overflow: hidden;
-  border: 1px solid var(--border-subtle);
-  position: relative;
-}
-
-.cam-action-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-  flex-shrink: 0;
-}
-
-.cam-action-row .pill-btn {
-  padding: 4px 6px;
-  height: 26px;
-  font-size: 0.7rem;
 }
 
 /* Hero Mode & Stop Row */
@@ -577,7 +542,29 @@ html, body {
   50% { opacity: 0.85; filter: brightness(1.2); }
 }
 
-/* Control Groups (Rotation & LEDs) */
+/* Center Card Groups (Rotation & LEDs) */
+.center-control-group {
+  margin-top: 4px;
+  padding: 6px 8px;
+  background: rgba(3, 12, 18, 0.4);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.center-act-btn {
+  height: 28px !important;
+  font-size: 0.72rem !important;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+}
+
 .control-group {
   margin-top: 2px;
   text-align: left;
@@ -601,8 +588,8 @@ html, body {
 .pill-row .pill-btn {
   flex: 1;
   padding: 2px 4px;
-  height: 23px;
-  font-size: 0.66rem;
+  height: 24px;
+  font-size: 0.68rem;
   border-radius: 6px;
 }
 
@@ -758,6 +745,179 @@ html, body {
 .servo-scan-btn:active {
   filter: brightness(1.15);
   transform: scale(0.96);
+}
+
+/* ================= GYRO ATTITUDE SENSOR VISUALIZER ================= */
+.gyro-attitude-container {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 3px;
+  padding-top: 3px;
+  border-top: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.group-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2px;
+}
+
+.gyro-heading-badge {
+  font-family: var(--font-hero);
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #38bdf8;
+  background: rgba(2, 132, 199, 0.15);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  border-radius: 4px;
+  padding: 1px 6px;
+  letter-spacing: 0.5px;
+}
+
+.gyro-visual-box {
+  position: relative;
+  width: 100%;
+  height: 52px;
+  background: radial-gradient(circle at 50% 50%, #071926 0%, #02090e 85%);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.6);
+}
+
+.attitude-horizon {
+  position: absolute;
+  width: 130px;
+  height: 130px;
+  border-radius: 50%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  opacity: 0.9;
+  transition: transform 0.08s ease-out;
+  pointer-events: none;
+}
+
+.horizon-sky {
+  width: 100%;
+  height: 50%;
+  background: linear-gradient(180deg, rgba(2, 132, 199, 0.45), rgba(56, 189, 248, 0.2));
+}
+
+.horizon-ground {
+  width: 100%;
+  height: 50%;
+  background: linear-gradient(180deg, rgba(180, 83, 9, 0.35), rgba(120, 53, 15, 0.55));
+}
+
+.horizon-line {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 100%;
+  height: 1.5px;
+  background: #38bdf8;
+  box-shadow: 0 0 6px #38bdf8;
+  transform: translateY(-50%);
+}
+
+.horizon-crosshair {
+  position: absolute;
+  inset: 0;
+  border: 1px dashed rgba(56, 189, 248, 0.25);
+  border-radius: 50%;
+}
+
+.attitude-bubble-ring {
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.attitude-bubble {
+  width: 6px;
+  height: 6px;
+  background: #10b981;
+  border-radius: 50%;
+  box-shadow: 0 0 6px #10b981;
+  transition: transform 0.08s ease-out;
+}
+
+.compass-ring-needle {
+  position: absolute;
+  top: 2px;
+  color: #ef4444;
+  font-size: 0.65rem;
+  font-weight: 900;
+  transition: transform 0.08s ease-out;
+  pointer-events: none;
+  text-shadow: 0 0 4px #ef4444;
+}
+
+.gyro-stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 3px;
+  margin-top: 2px;
+}
+
+.gyro-stat-cell {
+  background: rgba(19, 27, 46, 0.7);
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  padding: 2px 4px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.gyro-stat-lbl {
+  font-size: 0.58rem;
+  font-weight: 700;
+  color: var(--text-dim);
+  letter-spacing: 0.5px;
+}
+
+.gyro-stat-val {
+  font-family: var(--font-hero);
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: #38bdf8;
+  white-space: nowrap;
+}
+
+.gyro-action-row {
+  margin-top: 3px;
+}
+
+.gyro-cal-btn {
+  height: 24px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border-color: rgba(56, 189, 248, 0.4) !important;
+  color: #38bdf8 !important;
+}
+
+.gyro-cal-btn:active {
+  background: rgba(56, 189, 248, 0.25) !important;
+  transform: scale(0.97);
 }
 
 /* ================= PILL BUTTONS (COMMON) ================= */

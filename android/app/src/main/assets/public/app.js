@@ -484,6 +484,14 @@ function handleWsPayload(data) {
         $('radarDistVal').textContent = data.distance;
       }
 
+      // MPU6050 Gyro & Attitude Scope
+      if (data.heading !== undefined || data.yaw !== undefined) {
+        const h = Number(data.heading !== undefined ? data.heading : data.yaw) || 0;
+        const p = Number(data.pitch) || 0;
+        const r = Number(data.roll) || 0;
+        updateGyroVisualization(h, p, r);
+      }
+
       // Battery voltage / status
       const bat = $('batteryStat');
       if (bat && data.battery !== undefined) {
@@ -515,6 +523,12 @@ function handleWsPayload(data) {
         currentMode = data.value === 'auto' ? 'auto' : 'manual';
         applyAutoModeUi(currentMode === 'auto');
       }
+      break;
+
+    case 'gyro_calibrated':
+      updateGyroVisualization(0, 0, 0);
+      if ($('calGyroText')) $('calGyroText').textContent = '✅ Zeroed!';
+      vibrate(40);
       break;
 
     case 'radar':
@@ -642,6 +656,14 @@ async function updateStatus() {
     // Wi-Fi Info in Settings
     if (data.wifiMode && $('wifiModeVal')) $('wifiModeVal').textContent = data.wifiMode;
     if (data.ip && $('wifiIpVal')) $('wifiIpVal').textContent = data.ip;
+
+    // Gyro Attitude Scope (HTTP Fallback)
+    if (data.heading !== undefined || data.yaw !== undefined) {
+      const h = Number(data.heading !== undefined ? data.heading : data.yaw) || 0;
+      const p = Number(data.pitch) || 0;
+      const r = Number(data.roll) || 0;
+      updateGyroVisualization(h, p, r);
+    }
 
     // ESP32 Running Firmware Version
     if (data.version || data.firmware) {
@@ -1056,97 +1078,86 @@ if ($('servoRightBtn')) {
   };
 }
 
-// ================= LIVE OV7670 CAMERA MODAL =================
-let camTimer = null;
-let camFrameCount = 0;
-let lastFpsTime = performance.now();
-let preferBmp = false;
+// ================= MPU6050 GYROSCOPE ATTITUDE VISUALIZER & CALIBRATION =================
+let currentHeadingDeg = 0;
+let currentPitchDeg = 0;
+let currentRollDeg = 0;
 
-if ($('openCamModalBtn') && $('cameraModal')) {
-  $('openCamModalBtn').onclick = () => {
-    $('cameraModal').style.display = 'flex';
-  };
+function getCardinalDirection(deg) {
+  const directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+  const normalized = ((deg % 360) + 360) % 360;
+  const idx = Math.round(normalized / 45) % 8;
+  return `${Math.round(normalized)}° ${directions[idx]}`;
 }
 
-if ($('closeCamModal') && $('cameraModal')) {
-  $('closeCamModal').onclick = () => {
-    $('cameraModal').style.display = 'none';
-  };
-}
+function updateGyroVisualization(heading, pitch, roll) {
+  currentHeadingDeg = Number(heading) || 0;
+  currentPitchDeg = Number(pitch) || 0;
+  currentRollDeg = Number(roll) || 0;
 
-async function fetchCamFrame() {
-  if (!camOn) return;
-  const img = $('cam');
-  if (!img) return;
-  try {
-    const res = await fetch(`${base}/cam.jpg?t=${Date.now()}`, { cache: 'no-store' });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const blob = await res.blob();
-    if (!camOn) return;
-    const oldUrl = img.src;
-    img.src = URL.createObjectURL(blob);
-    if (oldUrl && oldUrl.startsWith('blob:')) {
-      setTimeout(() => URL.revokeObjectURL(oldUrl), 500);
-    }
-    const standby = $('camStandby');
-    if (standby) standby.classList.remove('active');
-    camFrameCount++;
-    const now = performance.now();
-    if (now - lastFpsTime >= 1000) {
-      if ($('camFpsVal')) $('camFpsVal').textContent = camFrameCount;
-      camFrameCount = 0;
-      lastFpsTime = now;
-    }
-    if (camOn) camTimer = setTimeout(fetchCamFrame, 40);
-  } catch (e) {
-    if (camOn) camTimer = setTimeout(fetchCamFrame, 250);
+  // 1. Numerical Stat Badges
+  if ($('gyroYawVal')) $('gyroYawVal').textContent = `${currentHeadingDeg.toFixed(1)}°`;
+  if ($('gyroPitchVal')) $('gyroPitchVal').textContent = `${currentPitchDeg.toFixed(1)}°`;
+  if ($('gyroRollVal')) $('gyroRollVal').textContent = `${currentRollDeg.toFixed(1)}°`;
+
+  // 2. Cardinal Heading Text
+  if ($('gyroCompassHeading')) {
+    $('gyroCompassHeading').textContent = getCardinalDirection(currentHeadingDeg);
+  }
+
+  // 3. Compass Needle Ring
+  const needle = $('compassRingNeedle');
+  if (needle) {
+    needle.style.transform = `rotate(${currentHeadingDeg}deg)`;
+  }
+
+  // 4. Artificial Horizon (Pitch translation + Roll tilt)
+  const horizon = $('attitudeHorizon');
+  if (horizon) {
+    const pitchOffset = Math.max(-20, Math.min(20, currentPitchDeg * 0.7));
+    horizon.style.transform = `translateY(${pitchOffset}px) rotate(${-currentRollDeg}deg)`;
+  }
+
+  // 5. Attitude Bubble
+  const bubble = $('attitudeBubble');
+  if (bubble) {
+    const bx = Math.max(-10, Math.min(10, currentRollDeg * 0.4));
+    const by = Math.max(-10, Math.min(10, -currentPitchDeg * 0.4));
+    bubble.style.transform = `translate(${bx}px, ${by}px)`;
   }
 }
 
-if ($('camToggleBtn')) {
-  $('camToggleBtn').onclick = () => {
-    camOn = !camOn;
-    vibrate(20);
-    const btn = $('camToggleBtn');
-    const standby = $('camStandby');
-    const badge = $('camStateBadge');
+async function calibrateGyro() {
+  vibrate(35);
+  const btn = $('calibrateGyroBtn');
+  const txt = $('calGyroText');
+  if (btn) btn.disabled = true;
+  if (txt) txt.textContent = 'Calibrating...';
 
-    if (camOn) {
-      btn.textContent = 'Camera OFF';
-      if (badge) {
-        badge.textContent = 'LIVE';
-        badge.style.color = '#10b981';
-      }
-      if (standby) standby.classList.remove('active');
-      fetchCamFrame();
-    } else {
-      btn.textContent = 'Camera ON';
-      if (badge) {
-        badge.textContent = 'OFF';
-        badge.style.color = 'var(--text-dim)';
-      }
-      if (standby) standby.classList.add('active');
-      clearTimeout(camTimer);
-      if ($('camFpsVal')) $('camFpsVal').textContent = '0';
+  // 1. WebSocket zero command
+  const sent = sendWs({ type: 'calibrate_gyro' });
+  if (!sent) {
+    // 2. HTTP REST fallback
+    try {
+      await api('/calibrate_gyro', { method: 'POST', timeout: 3000 });
+    } catch (err) {
+      console.warn('REST calibrate_gyro failed:', err);
     }
-  };
+  }
+
+  setTimeout(() => {
+    if (txt) txt.textContent = '✅ Gyro Calibrated!';
+    updateGyroVisualization(0, 0, 0);
+    vibrate(40);
+    setTimeout(() => {
+      if (txt) txt.textContent = 'Calibrate Gyro';
+      if (btn) btn.disabled = false;
+    }, 1800);
+  }, 650);
 }
 
-if ($('camSnapBtn')) {
-  $('camSnapBtn').onclick = () => {
-    vibrate(25);
-    const img = $('cam');
-    if (!img || !img.src || !camOn) {
-      alert('Turn Camera ON first to take a snapshot.');
-      return;
-    }
-    const a = document.createElement('a');
-    a.href = img.src;
-    a.download = `novax_${Date.now()}.jpg`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-  };
+if ($('calibrateGyroBtn')) {
+  $('calibrateGyroBtn').onclick = calibrateGyro;
 }
 
 // ================= SETTINGS & OTA MODAL =================
@@ -1498,7 +1509,7 @@ async function flashCloudOta() {
 }
 
 // ================= GITHUB APP UPDATER (WITH INTEGRITY CHECK & ROLLBACK) =================
-const CURRENT_APP_VERSION = '2.4.46';
+const CURRENT_APP_VERSION = '2.4.47';
 
 function getGitHubConfig() {
   const repo = $('ghRepoInput')?.value.trim() || localStorage.getItem('novax_gh_repo') || 'onebotyt/robocar';

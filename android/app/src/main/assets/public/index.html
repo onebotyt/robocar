@@ -24,7 +24,7 @@
   <script>
     (function() {
       // BUNDLE_VERSION must match CURRENT_APP_VERSION in app.js
-      var BUNDLE_VERSION = '2.4.38';
+      var BUNDLE_VERSION = '2.4.47';
       try {
         var params = new URLSearchParams(window.location.search);
         if (params.has('reset') || params.has('clear') || params.has('clean')) {
@@ -200,42 +200,45 @@
         </div>
       </section>
 
-      <!-- ================= 2. NOVA X CENTER CARD (LIVE CAMERA & CONTROLS) ================= -->
+      <!-- ================= 2. NOVA X CENTER CARD (MASTER CONTROLS, ROTATION & LEDS) ================= -->
       <section class="card card-center">
         <div class="card-header-simple">
           <span class="card-hero-title">NOVA X</span>
-          <span class="card-mode-tag" id="camStateBadge">CAM OFF</span>
+          <span class="card-mode-tag" id="carStatusBadge">DRIVE READY</span>
         </div>
 
-        <!-- Live Camera Feed in Center -->
-        <div class="center-cam-wrapper">
-          <div class="cam-feed-container">
-            <img id="cam" alt="NovaX Camera Stream" class="cam-img">
-            <div id="camStandby" class="cam-standby-overlay active">
-              <div class="standby-reticle"></div>
-              <span>CAMERA STANDBY</span>
-            </div>
-            <div class="cam-info-bar">
-              <span>FPS: <b id="camFpsVal">0</b></span>
-            </div>
-          </div>
-          <div class="cam-action-row">
-            <button id="camToggleBtn" class="pill-btn blue">Camera ON</button>
-            <button id="camSnapBtn" class="pill-btn">Snapshot</button>
-          </div>
-        </div>
-
-        <!-- Mode & Stop Row -->
+        <!-- Master Mode & Emergency Stop Row -->
         <div class="hero-actions-row">
           <button id="modeToggleBtn" class="hero-btn hero-blue">MANUAL</button>
           <button id="centerStopBtn" class="hero-btn hero-red">STOP</button>
         </div>
+
+        <!-- Precision Rotation Controls (Moved to Center) -->
+        <div class="control-group center-control-group">
+          <div class="group-title">Precision Rotation (Gyro)</div>
+          <div class="pill-row">
+            <button id="rotLBtn" class="pill-btn center-act-btn" title="Rotate 90° Left">↺ 90° Left</button>
+            <button id="rot360Btn" class="pill-btn blue center-act-btn" title="360° Gyro Spin">⟳ 360°</button>
+            <button id="rotRBtn" class="pill-btn center-act-btn" title="Rotate 90° Right">↻ 90° Right</button>
+          </div>
+        </div>
+
+        <!-- Chassis Lighting Controls (Moved to Center) -->
+        <div class="control-group center-control-group">
+          <div class="group-title">Chassis Lighting (74HC595)</div>
+          <div class="pill-row">
+            <button class="pill-btn active center-act-btn" data-led="off">Off</button>
+            <button class="pill-btn center-act-btn" data-led="blink">Blink</button>
+            <button class="pill-btn center-act-btn" data-led="warn">Warn</button>
+            <button class="pill-btn center-act-btn" data-led="pulse">Pulse</button>
+          </div>
+        </div>
       </section>
 
-      <!-- ================= 3. RADAR & AUXILIARY CONTROLS CARD ================= -->
+      <!-- ================= 3. RADAR & ATTITUDE GYRO CARD ================= -->
       <section class="card card-radar">
         <div class="card-header-simple">
-          <span class="card-title">Radar</span>
+          <span class="card-title">Radar & Gyro</span>
           <span class="card-mode-tag" id="radarStatusTag">IDLE</span>
         </div>
 
@@ -272,24 +275,51 @@
           </button>
         </div>
 
-        <!-- Rotation Section (Moved Below Radar) -->
-        <div class="control-group">
-          <div class="group-title">Rotation</div>
-          <div class="pill-row">
-            <button id="rotLBtn" class="pill-btn">Rotate L</button>
-            <button id="rotRBtn" class="pill-btn">Rotate R</button>
-            <button id="rot360Btn" class="pill-btn blue">360°</button>
+        <!-- GYRO ATTITUDE SENSOR VISUALIZATION (BELOW RADAR) -->
+        <div class="gyro-attitude-container">
+          <div class="group-title-row">
+            <span class="group-title">Attitude & Gyroscope</span>
+            <span class="gyro-heading-badge" id="gyroCompassHeading">0° N</span>
           </div>
-        </div>
 
-        <!-- LEDs Section (Moved Below Radar) -->
-        <div class="control-group">
-          <div class="group-title">LEDs</div>
-          <div class="pill-row">
-            <button class="pill-btn active" data-led="off">Off</button>
-            <button class="pill-btn" data-led="blink">Blink</button>
-            <button class="pill-btn" data-led="warn">Warn</button>
-            <button class="pill-btn" data-led="pulse">Pulse</button>
+          <!-- Attitude Horizon & Compass Scope -->
+          <div class="gyro-visual-box">
+            <div class="attitude-horizon" id="attitudeHorizon">
+              <div class="horizon-sky"></div>
+              <div class="horizon-ground"></div>
+              <div class="horizon-line" id="horizonLine"></div>
+              <div class="horizon-crosshair"></div>
+            </div>
+            <!-- Dynamic Pitch & Roll Tilt Bubble -->
+            <div class="attitude-bubble-ring">
+              <div class="attitude-bubble" id="attitudeBubble"></div>
+            </div>
+            <!-- Heading Compass Indicator Ring Needle -->
+            <div class="compass-ring-needle" id="compassRingNeedle">▲</div>
+          </div>
+
+          <!-- Angle Readouts Matrix -->
+          <div class="gyro-stats-grid">
+            <div class="gyro-stat-cell" title="Z-Axis Integrated Heading">
+              <span class="gyro-stat-lbl">YAW</span>
+              <span class="gyro-stat-val" id="gyroYawVal">0.0°</span>
+            </div>
+            <div class="gyro-stat-cell" title="Pitch (Tilt Forward/Back)">
+              <span class="gyro-stat-lbl">PITCH</span>
+              <span class="gyro-stat-val" id="gyroPitchVal">0.0°</span>
+            </div>
+            <div class="gyro-stat-cell" title="Roll (Tilt Left/Right)">
+              <span class="gyro-stat-lbl">ROLL</span>
+              <span class="gyro-stat-val" id="gyroRollVal">0.0°</span>
+            </div>
+          </div>
+
+          <!-- Gyro Calibration Button -->
+          <div class="gyro-action-row">
+            <button id="calibrateGyroBtn" class="pill-btn outline w-100 gyro-cal-btn" title="Zero and Calibrate MPU6050 Gyro">
+              <span class="btn-ic">⚖️</span>
+              <span id="calGyroText">Calibrate Gyro</span>
+            </button>
           </div>
         </div>
       </section>
@@ -412,7 +442,7 @@
   <!-- Dynamic In-App Hot JS Loader with Automatic Bundled Fallback -->
   <script>
     (function() {
-      var BUNDLE_VERSION = '2.4.38';
+      var BUNDLE_VERSION = '2.4.47';
       function _verGT(a, b) {
         var pa = (a||'').split('.').map(Number);
         var pb = (b||'').split('.').map(Number);
