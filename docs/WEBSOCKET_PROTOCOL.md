@@ -77,7 +77,7 @@ Requests the SG90 servo to sweep the HC-SR04 ultrasonic sensor from -90° to +90
 ```
 
 ### 2.7 Manual Servo Head Angle Command (<  SCAN  >)
-Positions the SG90 servo panning head (mounting the HC-SR04 sonar and OV7670 camera) to a specific angle between 0° and 180° (90° = Center).
+Positions the SG90 servo panning head (mounting the HC-SR04 ultrasonic sensor) to a specific angle between 0° and 180° (90° = Center).
 ```json
 {
   "type": "servo",
@@ -121,7 +121,6 @@ Broadcast by ESP32 at ~10 Hz (every 100ms) to all connected clients.
   "heading": 183.5,
   "battery": 3.92,
   "mode": "manual",
-  "camera": true,
   "wifiMode": "AP",
   "ip": "192.168.4.1",
   "uptime": 12480
@@ -131,7 +130,6 @@ Broadcast by ESP32 at ~10 Hz (every 100ms) to all connected clients.
 - `"heading"` (float): MPU6050 estimated yaw rotation in degrees (`0.0` to `359.9`).
 - `"battery"` (float): Estimated battery voltage (e.g. `3.92` V).
 - `"mode"` (string): Current robot state (`"manual"` or `"auto"`).
-- `"camera"` (boolean): `true` if OV7670 camera sensor initialized successfully.
 - `"wifiMode"` (string): `"AP"` or `"STA"`.
 - `"ip"` (string): Current IP address of the robot car.
 - `"uptime"` (integer): ESP32 uptime in seconds.

@@ -34,16 +34,15 @@ The frontend is a mobile-first web app that runs equally as a **Progressive Web 
 +-----------------------------------------------------------------------------------+
 |  [ CARD 1: CONTROLS ]      |  [ CARD 2: NOVA X (CENTER) ] |  [ CARD 3: RADAR & AUX ]     |
 |                            |                              |                              |
-|  ▲ Forward Arrow           |  LIVE CAMERA (OV7670)        |  ╭────────╮ Radar Arc        |
-|  ◄ Left   [■]   Right ►    |  ┌────────────────────────┐  |  │  42 cm │ Sweep Needle     |
-|  ▼ Reverse Arrow           |  │ Live Video Feed Window │  |  ╰────────╯ Blips (L, F, R)  |
-|                            |  │ (FPS Counter & Badge)  │  |                              |
-|  [Draw Mode] [Clear] [Send]|  └────────────────────────┘  |  [Scan]        [Sonar ON]    |
-|                            |  [Camera ON]  [Snapshot]     |                              |
-|  *Tapping "Draw Mode"      |                              |  Rotation:                   |
-|   swaps D-pad with touch   |  [MANUAL / AUTO]   [ STOP ]  |  [Rotate L] [Rotate R] [360°]|
-|   path-drawing canvas!     |                              |  LEDs:                       |
-|                            |                              |  [Off] [Blink] [Warn] [Pulse]|
+|  ▲ Forward Arrow           |  MASTER CONTROLS & LIGHTING  |  ╭────────╮ Radar Arc        |
+|  ◄ Left   [■]   Right ►    |  [ MANUAL / AUTO ]  [ STOP ] |  │  42 cm │ Sweep Needle     |
+|  ▼ Reverse Arrow           |                              |  ╰────────╯ Blips (L, F, R)  |
+|                            |  Rotation Controls:          |                              |
+|  [Draw Mode] [Clear] [Send]|  [↺ 90°L]  [⟳ 360°]  [↻ 90°R] |  Attitude & Gyroscope Scope: |
+|                            |                              |  [─── ◯ ───] Level Horizon   |
+|  *Tapping "Draw Mode"      |  74HC595 LED Lighting:       |  Yaw: 0.0° Pitch: 0° Roll: 0°|
+|   swaps D-pad with touch   |  [Off] [Blink] [Warn] [Pulse]|                              |
+|   path-drawing canvas!     |                              |  [ ⚖️ Calibrate Gyro ]       |
 +-----------------------------------------------------------------------------------+
 ```
 
@@ -138,7 +137,6 @@ NovaX includes a built-in **Live Hot-Update Engine**. You can update the user in
   - `GET /move?dir={F|B|L|R|S}`: Motor drive commands.
   - `POST /path`: Path coordinate waypoints (`x,y;x,y`).
   - `GET /scan` & `GET /scanResult`: Ultrasonic servo sweep.
-  - `GET /cam.jpg`: OV7670 live camera snapshot / stream frame.
   - `GET /led?pattern={off|blink|warn|pulse}`: LED shift register modes.
   - `GET /rot?deg={90L|90R|360}`: Quick rotation maneuvers.
   - `POST /update`: Firmware OTA `.bin` upload.

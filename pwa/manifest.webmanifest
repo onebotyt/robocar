@@ -1,7 +1,7 @@
 {
   "name": "NovaX Car Controller",
   "short_name": "NovaX",
-  "description": "High-performance mobile controller for NovaX ESP32 robot car with live camera, telemetry, radar, and OTA updater.",
+  "description": "High-performance mobile controller for NovaX ESP32 robot car with real-time telemetry, 180° radar, attitude HUD, and OTA updater.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",

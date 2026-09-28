@@ -19,25 +19,25 @@
 #include <mbedtls/base64.h>
 
 // ===================================================================================
-// 1. FINALIZED ESP32 V2 GPIO MAPPING — PURE CAR (CAMERA OMITTED)
+// 1. FINALIZED ESP32 V2 GPIO MAPPING — PURE CAR (CUSTOM HARDWARE LAYOUT)
 // ===================================================================================
 // --- MX1508 Dual H-Bridge Motor Driver ---
 #define MOTOR_IN1       13   // Left Motor Forward
 #define MOTOR_IN2       14   // Left Motor Reverse
-#define MOTOR_IN3       18   // Right Motor Forward
-#define MOTOR_IN4       19   // Right Motor Reverse
+#define MOTOR_IN3       16   // Right Motor Forward
+#define MOTOR_IN4       17   // Right Motor Reverse
 
 // --- HC-SR04 Ultrasonic Distance Sensor ---
-#define TRIG_PIN        23
-#define ECHO_PIN         3   // Uses 1k/2k voltage divider to 3.3V!
+#define TRIG_PIN        23   // Trigger Pin (Output)
+#define ECHO_PIN        34   // Echo Pin (Input only, uses 1k/2k voltage divider to 3.3V!)
 
 // --- SG90 Micro Servo ---
-#define SERVO_PIN        2
+#define SERVO_PIN       25   // Radar Servo PWM Signal
 
 // --- 74HC595 8-Bit Shift Register (LED Effects) ---
-#define LED_DATA         5   // SER   [GPIO12 is strapping pin, held LOW at boot]
-#define LED_CLOCK       12   // SRCLK
-#define LED_LATCH       15   // RCLK
+#define LED_DATA         5   // SER   (Data)
+#define LED_CLOCK       18   // SH_CP (Clock)
+#define LED_LATCH       19   // ST_CP (Latch)
 // 74HC595: VCC=3.3V, OE=GND, MR=3.3V
 
 // --- MPU6050 6-DOF IMU (Dedicated I2C Bus) ---

@@ -1,6 +1,6 @@
 # 🌐 NovaX V2 - REST API Reference
 
-The ESP32 Web Server provides RESTful HTTP endpoints for device configuration, Wi-Fi management, firmware OTA upgrades, camera snapshots, and backward-compatible fallbacks.
+The ESP32 Web Server provides RESTful HTTP endpoints for device configuration, Wi-Fi management, firmware OTA upgrades, gyro calibration, and backward-compatible fallbacks.
 
 All endpoints support Cross-Origin Resource Sharing (`CORS`) with `Access-Control-Allow-Origin: *`.
 
@@ -18,7 +18,6 @@ Returns hardware, firmware version, build metadata, and system health.
   "version": "2.2.0",
   "hardware": "ESP32-WROOM-32",
   "buildDate": "Sep 24 2026",
-  "camera": "OV7670",
   "imu": "MPU6050",
   "status": "online"
 }
@@ -33,7 +32,6 @@ Returns complete snapshot of device telemetry.
   "distance": 42,
   "mode": 1,
   "yaw": 183.5,
-  "camera": 1,
   "wifiMode": "AP",
   "ip": "192.168.4.1",
   "version": "2.2.0"
@@ -137,14 +135,6 @@ Uploads a compiled firmware binary (`firmware.bin`) to flash memory.
 - **Safety Interlock**: All motors are immediately cut off and disabled before flashing starts.
 - **Response**: `200 OK` on flash success with automatic reboot in 500ms; `401 Unauthorized` or `500 Server Error` on failure.
 
----
-
-## 4. Live Camera & Visual Endpoints
-
-### `GET /cam.jpg`
-Captures and returns a single JPEG frame from the OV7670 camera.
-- **Request**: `GET /cam.jpg`
-- **Response**: `200 OK` (`Content-Type: image/jpeg`) with `Cache-Control: no-store`.
 
 ---
 
