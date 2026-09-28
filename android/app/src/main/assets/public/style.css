@@ -1033,63 +1033,6 @@ html, body {
   line-height: 1;
 }
 
-/* Camera Modal Content */
-.cam-feed-container {
-  position: relative;
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  background: #02070d;
-  border-radius: 10px;
-  overflow: hidden;
-  border: 1px solid var(--border-subtle);
-}
-
-.cam-img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.cam-standby-overlay {
-  position: absolute;
-  inset: 0;
-  display: none;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  background: #030c14;
-  color: var(--text-dim);
-  font-size: 0.75rem;
-  font-weight: 700;
-}
-
-.cam-standby-overlay.active {
-  display: flex;
-}
-
-.standby-reticle {
-  width: 40px;
-  height: 40px;
-  border: 2px dashed var(--color-blue);
-  border-radius: 50%;
-}
-
-.cam-info-bar {
-  position: absolute;
-  bottom: 6px;
-  left: 8px;
-  right: 8px;
-  display: flex;
-  justify-content: space-between;
-  font-size: 0.68rem;
-  color: var(--text-dim);
-  background: rgba(0, 0, 0, 0.6);
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-
 .modal-btn-row {
   display: grid;
   grid-template-columns: 1fr 1fr;

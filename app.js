@@ -15,7 +15,6 @@ let lastWsMessageTime = 0;
 let lastHttpSuccessTime = 0;
 
 let isDrawMode = false;
-let camOn = false;
 let isConnected = false;
 let sonarEnabled = true;
 let currentMode = 'manual';

@@ -15,7 +15,6 @@ let lastWsMessageTime = 0;
 let lastHttpSuccessTime = 0;
 
 let isDrawMode = false;
-let camOn = false;
 let isConnected = false;
 let sonarEnabled = true;
 let currentMode = 'manual';
@@ -1509,7 +1508,7 @@ async function flashCloudOta() {
 }
 
 // ================= GITHUB APP UPDATER (WITH INTEGRITY CHECK & ROLLBACK) =================
-const CURRENT_APP_VERSION = '2.4.47';
+const CURRENT_APP_VERSION = '2.4.48';
 
 function getGitHubConfig() {
   const repo = $('ghRepoInput')?.value.trim() || localStorage.getItem('novax_gh_repo') || 'onebotyt/robocar';
