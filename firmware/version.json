@@ -1,8 +1,8 @@
 {
-  "version": "2.4.50",
+  "version": "2.4.51",
   "buildDate": "2026-09-28",
   "target": "ESP32-WROOM-32",
   "binFile": "NovaX-Firmware.bin",
   "downloadUrl": "https://raw.githubusercontent.com/onebotyt/robocar/main/firmware/NovaX-Firmware.bin",
-  "changelog": "NovaX Pure Robotics: MX1508, HC-SR04, SG90, MPU6050, 74HC595 and Web OTA."
+  "changelog": "NovaX Pure Robotics Edition: conflict-free pin matrix, MPU6050 attitude HUD, and gyro calibration."
 }
