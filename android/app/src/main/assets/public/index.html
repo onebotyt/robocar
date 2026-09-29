@@ -24,7 +24,7 @@
   <script>
     (function() {
       // BUNDLE_VERSION must match CURRENT_APP_VERSION in app.js
-      var BUNDLE_VERSION = '2.4.50';
+      var BUNDLE_VERSION = '2.4.55';
       try {
         var params = new URLSearchParams(window.location.search);
         if (params.has('reset') || params.has('clear') || params.has('clean')) {
@@ -127,12 +127,12 @@
       </div>
     </div>
 
-    <!-- ESP32 BOOTSTRAP / FIRMWARE FLASH BANNER -->
+    <!-- FIRMWARE FLASH BANNER -->
     <div id="bootstrapOtaBanner" class="update-banner" style="display:none; background: linear-gradient(135deg, rgba(6, 182, 212, 0.25), rgba(2, 132, 199, 0.35)); border-color: #06b6d4;">
       <div class="update-banner-left">
         <span class="update-icon">⚡</span>
         <div class="update-text-box">
-          <span class="update-title" style="color: #67e8f9;">ESP32 Firmware Flash Ready</span>
+          <span class="update-title" style="color: #67e8f9;">Firmware Flash Ready</span>
           <span class="update-desc" id="bootstrapBannerDesc" style="color: #cffafe;">Pre-downloaded firmware is ready in phone memory.</span>
         </div>
       </div>
@@ -200,11 +200,30 @@
         </div>
       </section>
 
-      <!-- ================= 2. NOVA X CENTER CARD (MASTER CONTROLS, ROTATION & LEDS) ================= -->
+      <!-- ================= 2. NOVA X CENTER CARD (LIVE CAMERA, CONTROLS, ROTATION & SPEED) ================= -->
       <section class="card card-center">
         <div class="card-header-simple">
           <span class="card-hero-title">NOVA X</span>
-          <span class="card-mode-tag" id="carStatusBadge">DRIVE READY</span>
+          <span class="card-mode-tag" id="camStateBadge">CAM STANDBY</span>
+        </div>
+
+        <!-- Live Camera Feed Window in Center -->
+        <div class="center-cam-wrapper">
+          <div class="cam-feed-container">
+            <img id="cam" alt="NovaX Live Camera Stream" class="cam-img">
+            <div id="camStandby" class="cam-standby-overlay active">
+              <div class="standby-reticle"></div>
+              <span>CAMERA STANDBY</span>
+            </div>
+            <div class="cam-info-bar">
+              <span class="cam-badge">160x120 Q90</span>
+              <span>FPS: <b id="camFpsVal">0</b></span>
+            </div>
+          </div>
+          <div class="cam-action-row">
+            <button id="camToggleBtn" class="pill-btn blue">Camera ON</button>
+            <button id="camSnapBtn" class="pill-btn">Snapshot</button>
+          </div>
         </div>
 
         <!-- Master Mode & Emergency Stop Row -->
@@ -223,14 +242,14 @@
           </div>
         </div>
 
-        <!-- Chassis Lighting Controls (Moved to Center) -->
+        <!-- Drive Speed Profile Controls -->
         <div class="control-group center-control-group">
-          <div class="group-title">Chassis Lighting (74HC595)</div>
+          <div class="group-title">Drive Speed Profile</div>
           <div class="pill-row">
-            <button class="pill-btn active center-act-btn" data-led="off">Off</button>
-            <button class="pill-btn center-act-btn" data-led="blink">Blink</button>
-            <button class="pill-btn center-act-btn" data-led="warn">Warn</button>
-            <button class="pill-btn center-act-btn" data-led="pulse">Pulse</button>
+            <button class="pill-btn center-act-btn" data-speed="140">Slow</button>
+            <button class="pill-btn active blue center-act-btn" data-speed="180">Normal</button>
+            <button class="pill-btn center-act-btn" data-speed="220">Fast</button>
+            <button class="pill-btn center-act-btn" data-speed="255">Turbo</button>
           </div>
         </div>
       </section>
@@ -336,14 +355,14 @@
 
         <div class="settings-scroll-area">
           
-          <!-- ESP32 Hardware Connection Link Card -->
+          <!-- Hardware Connection Link Card -->
           <div class="config-block highlight-block" id="espConnCard">
-            <div class="block-title">ESP32 Hardware Connection</div>
+            <div class="block-title">Hardware Connection</div>
             <div class="stat-line"><span>Link Status:</span> <b id="connStatusStat" class="status-red">🔴 Disconnected</b></div>
             <div class="stat-line"><span>Protocol:</span> <b id="connProtoStat">—</b></div>
             <div class="stat-line"><span>Car Host:</span> <b id="connTargetStat">http://192.168.4.1</b></div>
             <div class="pill-row mt-6">
-              <button id="pingCarBtn" class="pill-btn blue w-100">⚡ Test Connection to ESP32</button>
+              <button id="pingCarBtn" class="pill-btn blue w-100">⚡ Test Connection to Car</button>
             </div>
           </div>
 
@@ -403,8 +422,8 @@
 
           <!-- Firmware OTA Update -->
           <div class="config-block">
-            <div class="block-title">ESP32 Firmware OTA (Cloud & Local)</div>
-            <div class="stat-line"><span>Installed on ESP32:</span> <b id="fwVersionVal">— (Disconnected)</b></div>
+            <div class="block-title">Firmware OTA (Cloud & Local)</div>
+            <div class="stat-line"><span>Installed on Car:</span> <b id="fwVersionVal">— (Disconnected)</b></div>
             <div class="stat-line"><span>Latest on GitHub:</span> <b id="ghFwVersionVal" class="text-green">—</b></div>
             <input type="password" id="otaTokenInput" value="NovaX-OTA-ChangeMe" placeholder="OTA Token" class="mt-6">
 
@@ -414,7 +433,7 @@
               <div id="fwCacheStatus" class="sub-label mt-2" style="font-size:0.8rem;">Checking cache...</div>
               
               <!-- 1-Tap Offline Flashing of Pre-Downloaded Firmware -->
-              <button id="flashCachedFwBtn" class="pill-btn blue w-100 mt-4" style="font-size:0.9rem;padding:0.7rem;font-weight:700;">⚡ Flash Pre-Downloaded Firmware to ESP32</button>
+              <button id="flashCachedFwBtn" class="pill-btn blue w-100 mt-4" style="font-size:0.9rem;padding:0.7rem;font-weight:700;">⚡ Flash Pre-Downloaded Firmware</button>
               
               <div class="pill-row mt-4">
                 <button id="downloadFwCacheBtn" class="pill-btn outline" style="font-size:0.75rem;">📥 Pre-Download (Internet)</button>
@@ -442,7 +461,7 @@
   <!-- Dynamic In-App Hot JS Loader with Automatic Bundled Fallback -->
   <script>
     (function() {
-      var BUNDLE_VERSION = '2.4.50';
+      var BUNDLE_VERSION = '2.4.55';
       function _verGT(a, b) {
         var pa = (a||'').split('.').map(Number);
         var pb = (b||'').split('.').map(Number);

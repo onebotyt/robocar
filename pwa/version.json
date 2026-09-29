@@ -7,7 +7,7 @@
     "version": "2.4.56",
     "binUrl": "https://raw.githubusercontent.com/onebotyt/robocar/main/firmware/NovaX-Firmware.bin",
     "releaseDate": "2026-09-28",
-    "changelog": "ESP32 Pure Robotics: MX1508, HC-SR04, SG90, MPU6050, 74HC595 and Web OTA without camera buffers."
+    "changelog": "Pure Robotics: MX1508 Motors, HC-SR04 Sonar, SG90 Radar Servo, MPU6050 Gyro HUD and Web OTA."
   },
   "repo": "onebotyt/robocar",
   "branch": "main",

@@ -1,84 +1,150 @@
 /*
  * ===================================================================================
- *  NovaX V2 (No-Camera Edition) - Autonomous & Remote Robot Car Firmware
- *  Hardware Target: ESP32-WROOM-32 (V2 Hardware Map)
- *  Architecture: WebSocket Real-Time Control (:81) + REST Config (:80) + OTA Engine
- *  Version: 2.4.52  (Pure Car Edition: Motors + Sonar + Radar Servo + MPU6050 Gyro + LEDs)
+ *  NovaX V3 (ESP32-WROOM-32 Edition) - Autonomous & Remote Robot Car Firmware
+ *  Target Hardware: ESP32 Dev Module / ESP32-WROOM-32 (NO PSRAM)
+ *  Subsystems:
+ *    1. OV7670 Camera (FIFO-less I2S Direct Capture -> ESP32 JPEG 160x120 Q90 -> TCP :5000)
+ *    2. MPU6050 6-DOF IMU (Attitude, Gyro Yaw Integration, Shared I2C : GPIO21/22)
+ *    3. MX1508 Dual H-Bridge Motor Driver (GPIO 16, 17, 18, 19 with Soft-Start Slew)
+ *    4. HC-SR04 Ultrasonic Distance Sensor (TRIG=23, ECHO=27 via 1k/2k Divider)
+ *    5. SG90 Micro Servo (Radar Scanning on GPIO4 via ESP32Servo)
+ *    6. 74HC595 8-Bit Shift Register (LED Effects on GPIO 0, 2, 12)
+ *    7. Networking: AP (NovaX-Car) + STA + HTTP (:80) + WebSocket (:81) + Web OTA
  * ===================================================================================
  */
+
+#include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
-#include <ESP32Servo.h>
-#include <Wire.h>
+#define sensor_t adafruit_sensor_t
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
+#undef sensor_t
+#include <ESP32Servo.h>
 #include <Preferences.h>
 #include <ESPmDNS.h>
 #include <Update.h>
 #include <mbedtls/sha1.h>
 #include <mbedtls/base64.h>
+#include <pgmspace.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "img_converters.h"
+#include "esp_log.h"
+#include "esp32-hal-ledc.h"
+#include "driver/ledc.h"
+#include "driver/gpio.h"
 #include "soc/soc.h"
-#include "soc/rtc_cntl_reg.h"
-
-// Compatibility macros for mbedtls 2.x vs 3.x
-#if !defined(MBEDTLS_DEPRECATED_REMOVED) && !defined(mbedtls_sha1_starts_ret)
-  #define mbedtls_sha1_starts_ret(ctx)              mbedtls_sha1_starts(ctx)
-  #define mbedtls_sha1_update_ret(ctx, input, ilen) mbedtls_sha1_update(ctx, input, ilen)
-  #define mbedtls_sha1_finish_ret(ctx, output)      mbedtls_sha1_finish(ctx, output)
-#endif
+#include "soc/gpio_sig_map.h"
+#include "soc/i2s_reg.h"
+#include "soc/i2s_struct.h"
+#include "soc/io_mux_reg.h"
+#include "rom/lldesc.h"
+#include "esp_intr_alloc.h"
+#include "driver/periph_ctrl.h"
+#include "esp_heap_caps.h"
 
 // ===================================================================================
-// 1. FINALIZED ESP32 V2 GPIO MAPPING — PURE CAR (CUSTOM HARDWARE LAYOUT)
+// 1. PIN CONFIGURATION & HARDWARE MATRIX (ESP32-WROOM-32)
 // ===================================================================================
+
+// --- OV7670 Camera (FIFO-less I2S Direct Capture) ---
+#define NVX_CAM_D0      36   // GPIO36 (VP, input only)
+#define NVX_CAM_D1      39   // GPIO39 (VN, input only)
+#define NVX_CAM_D2      34   // GPIO34 (input only)
+#define NVX_CAM_D3      35   // GPIO35 (input only)
+#define NVX_CAM_D4      32   // GPIO32
+#define NVX_CAM_D5      33   // GPIO33
+#define NVX_CAM_D6      25   // GPIO25
+#define NVX_CAM_D7      26   // GPIO26
+#define NVX_CAM_XCLK    15   // GPIO15 (10 MHz PWM via LEDC Channel 0)
+#define NVX_CAM_PCLK    14   // GPIO14 (Pixel Clock to I2S0)
+#define NVX_CAM_VSYNC   13   // GPIO13 (Frame VSYNC to I2S0 & ISR)
+// Note: HREF is physically DISCONNECTED / NOT USED (routed internally to 0x38 logic-HIGH)
+#define NVX_CAM_SIOD    21   // GPIO21 (Shared I2C SDA with MPU6050, 4.7k pull-up to 3.3V)
+#define NVX_CAM_SIOC    22   // GPIO22 (Shared I2C SCL with MPU6050, 4.7k pull-up to 3.3V)
+
+// Camera Frame Dimensions & Output
+#define NVX_FRAME_W     160
+#define NVX_FRAME_H     120
+#define NVX_FRAME_BPP   2    // RGB565 (2 bytes per pixel)
+#define NVX_FRAME_BYTES ((size_t)NVX_FRAME_W * NVX_FRAME_H * NVX_FRAME_BPP) // 38,400 bytes
+
 // --- MX1508 Dual H-Bridge Motor Driver ---
-#define MOTOR_IN1       13   // Left Motor Forward
-#define MOTOR_IN2       14   // Left Motor Reverse
-#define MOTOR_IN3       16   // Right Motor Forward
-#define MOTOR_IN4       17   // Right Motor Reverse
+#define MOTOR_IN1       16   // GPIO16 (Left Motor Forward, LEDC Channel 2)
+#define MOTOR_IN2       17   // GPIO17 (Left Motor Reverse, LEDC Channel 3) - HREF reused safely!
+#define MOTOR_IN3       18   // GPIO18 (Right Motor Forward, LEDC Channel 4)
+#define MOTOR_IN4       19   // GPIO19 (Right Motor Reverse, LEDC Channel 5)
 
 // --- HC-SR04 Ultrasonic Distance Sensor ---
-#define TRIG_PIN        23   // Trigger Pin (Output)
-#define ECHO_PIN        34   // Echo Pin (Input only, uses 1k/2k voltage divider to 3.3V!)
+#define TRIG_PIN        23   // GPIO23 (Sonar Trigger Pulse Output)
+#define ECHO_PIN        27   // GPIO27 (Sonar Echo Input - uses 1k/2k divider from 5V echo!)
 
-// --- SG90 Micro Servo ---
-#define SERVO_PIN       25   // Radar Servo PWM Signal
+// --- SG90 Radar Micro Servo ---
+#define SERVO_PIN        4   // GPIO4  (ESP32Servo PWM Output)
 
-// --- 74HC595 8-Bit Shift Register (LED Effects) ---
-#define LED_DATA         5   // SER   (Data)
-#define LED_CLOCK       18   // SH_CP (Clock)
-#define LED_LATCH       19   // ST_CP (Latch)
-// 74HC595: VCC=3.3V, OE=GND, MR=3.3V
+// --- 74HC595 8-Bit Shift Register (LED Lighting & Effects) ---
+#define LED_DATA         0   // GPIO0  (SER / Serial Data Input)
+#define LED_CLOCK        2   // GPIO2  (SRCLK / Shift Register Clock)
+#define LED_LATCH       12   // GPIO12 (RCLK / Storage Register Latch)
+// 74HC595: VCC=3.3V, GND=GND, OE=GND, MR=3.3V
 
-// --- MPU6050 6-DOF IMU (Dedicated I2C Bus) ---
-#define MPU_SDA         21   // Dedicated I2C Data
-#define MPU_SCL         22   // Dedicated I2C Clock
+// --- MPU6050 6-DOF IMU ---
+#define MPU_SDA         21   // Shared I2C Data
+#define MPU_SCL         22   // Shared I2C Clock
+#define MPU_ADDR        0x68 // I2C Address (AD0 connected to GND)
+#define GYRO_REVERSE_Z  false // Set to true if yaw rotation direction is inverted
+
+#define SERIAL_ENABLED   1
+
+#if SERIAL_ENABLED
+  #define DEBUG_PRINT(x)    Serial.print(x)
+  #define DEBUG_PRINTLN(x)  Serial.println(x)
+  #define DEBUG_PRINTF(...) Serial.printf(__VA_ARGS__)
+#else
+  #define DEBUG_PRINT(x)
+  #define DEBUG_PRINTLN(x)
+  #define DEBUG_PRINTF(...)
+#endif
 
 // ===================================================================================
 // 2. CONSTANTS & SYSTEM CONFIGURATION
 // ===================================================================================
-const char* FIRMWARE_VERSION  = "2.4.56";
-const char* HARDWARE_VERSION  = "ESP32-V2-NOCAM";
-const char* BUILD_DATE        = "2026-09-28";
+const char* FIRMWARE_VERSION  = "3.0.0-ESP32";
+const char* HARDWARE_VERSION  = "ESP32-WROOM-V3-CAM";
+const char* BUILD_DATE        = "2026-09-29";
 const char* AP_DEFAULT_SSID   = "NovaX-Car";
 const char* AP_DEFAULT_PASS   = "12345678";
 const char* OTA_DEFAULT_TOKEN = "NovaX-OTA-ChangeMe";
 
-// Motor Safety Watchdog
+// Camera TCP Stream Config
+const uint16_t CAM_TCP_PORT   = 5000;
+const uint8_t  JPEG_QUALITY   = 90;
+#define NVX_JPEG_TXBUF_BYTES  4096
+
+// Motor Safety Watchdog (ms)
 const unsigned long MOTOR_WATCHDOG_MS = 400;
 
 // Autonomous Navigation Tuning
-const int   OBSTACLE_LIMIT_CM    = 50;
-const int   CRUISE_SPEED_PWM     = 175;
-const int   TURN_SPEED_PWM       = 210;
+const int OBSTACLE_LIMIT_CM = 50;
+const int CRUISE_SPEED_PWM  = 175;
+const int TURN_SPEED_PWM    = 210;
 
-// Sonar cache TTL (ms) to prevent blocking pulseIn loops
+// Sonar cache TTL (ms)
 const unsigned long SONAR_CACHE_MS = 80;
 
 // WebSocket limits
 const size_t WS_MAX_PAYLOAD = 4096;
-const unsigned long WS_BYTE_TIMEOUT_MS = 50;
-const uint8_t MAX_WIFI_PROFILES = 5;
 const uint8_t MAX_WS_CLIENTS = 4;
+
+// LEDC Motor Channels
+const int MOTOR_PWM_FREQ = 1000;
+const int MOTOR_PWM_RES  = 8;
+const int LEDC_CH_IN1    = 2;
+const int LEDC_CH_IN2    = 3;
+const int LEDC_CH_IN3    = 4;
+const int LEDC_CH_IN4    = 5;
 
 // ===================================================================================
 // 3. GLOBAL INSTANCES & SYSTEM STATE
@@ -86,11 +152,24 @@ const uint8_t MAX_WS_CLIENTS = 4;
 WebServer        restServer(80);
 WiFiServer       wsServer(81);
 WiFiClient       wsClients[MAX_WS_CLIENTS];
+WiFiServer       cameraTcpServer(CAM_TCP_PORT);
+WiFiClient       cameraTcpClient;
 Servo            radarServo;
 Adafruit_MPU6050 mpu;
 Preferences      nvsPrefs;
 
-// Motor Safety & Soft-Start State (Protects against battery sag / brownout)
+// Camera State
+bool cameraAvailable       = false;
+static uint8_t* s_jpegInput = nullptr;
+static uint8_t  s_jpegTxBuf[NVX_JPEG_TXBUF_BYTES];
+static size_t   s_jpegTxUsed = 0;
+static size_t   s_jpegBytesSent = 0;
+static bool     s_jpegCallbackFailed = false;
+static uint32_t cameraFrameId = 0;
+static uint32_t cameraFramesSent = 0;
+static uint32_t cameraFpsStart = 0;
+
+// Motor Safety & Soft-Start Slew State
 volatile unsigned long lastDriveCmdMs = 0;
 volatile bool motorRunning = false;
 volatile bool manualMode   = true;
@@ -103,16 +182,23 @@ unsigned long lastMotorRampMs = 0;
 
 // MPU6050 Attitude & Gyro State
 bool          mpuAvailable   = false;
-uint8_t       mpuI2cAddress  = 0x68;
 float         gyroZBias      = 0.0f;
 float         yawHeading     = 0.0f;
 float         pitchAngle     = 0.0f;
 float         rollAngle      = 0.0f;
 unsigned long lastGyroMicros = 0;
+// Raw IMU sensor values for 500ms diagnostics
+float         rawAX          = 0.0f;
+float         rawAY          = 0.0f;
+float         rawAZ          = 0.0f;
+float         rawGX          = 0.0f;
+float         rawGY          = 0.0f;
+float         rawGZ          = 0.0f;
 
 // 74HC595 LED State
 String        currentLedEffect = "off";
 unsigned long lastLedUpdateMs  = 0;
+uint8_t       currentLedMask   = 0x00;
 
 // Radar & Sonar State
 bool          sonarActive       = true;
@@ -135,25 +221,26 @@ enum AutoDriveState {
 AutoDriveState autoState       = AUTO_STOPPED;
 unsigned long  autoActionTimer = 0;
 
-// Non-blocking gyro rotate state
+// Non-blocking Gyro Rotate State
 enum RotateState { ROT_IDLE, ROT_TURNING };
 RotateState   rotateState     = ROT_IDLE;
 float         rotateTarget    = 0.0f;
 bool          rotateTurnRight = true;
 float         rotateInitYaw   = 0.0f;
+float         rotatePrevYaw   = 0.0f;
+float         rotateAccumYaw  = 0.0f;
 unsigned long rotateStartMs   = 0;
 
-// Wi-Fi deferred STA connect & scan state
-bool          pendingStaConnect = false;
-String        pendingStaSsid    = "";
-String        pendingStaPass    = "";
-unsigned long pendingStaDelay   = 0;
-bool          wifiScanPending   = false;
-unsigned long wifiScanStartedMs = 0;
-
-// OTA auth flag
-bool otaAuthorised   = false;
-int  activeWifiIndex = -1;
+// Wi-Fi / NVS State
+const int MAX_SAVED_NETS = 3;
+struct SavedNetwork {
+  char ssid[33];
+  char pass[65];
+  uint8_t valid;
+};
+SavedNetwork savedNets[MAX_SAVED_NETS];
+int selectedNetIdx = 0;
+bool otaAuthorised = false;
 
 // Forward Declarations
 void stopCar();
@@ -166,64 +253,884 @@ long readUltrasonicCM();
 void broadcastWsText(const String& payload);
 void handleWsMessage(WiFiClient& client, const String& msg);
 void updateLEDs();
+void write595(uint8_t val);
 void stepAutoNav();
+bool scanI2CBus();
+void initMPU();
 void updateGyroHeading();
 void calibrateGyro();
 void stepNonBlockingRotate();
 void pollWebSocketServer();
-String getWifiProfilesJson();
-void handleWifiScan();
-void handleWifiSaved();
-void handleWifiSave();
-void handleWifiSelect();
-void handleWifiDelete();
-void handleSwitchSTA();
-void handleSwitchAP();
-void processPendingStaConnect();
+bool sendJPEGFrame();
+void stepCameraService();
 
 // ===================================================================================
-// 4. LOW-LEVEL HARDWARE DRIVERS & SLEW-RATE MOTOR CONTROLLER
+// 4. LOW-LEVEL OV7670 I2S/DMA CAMERA DRIVER
+// ===================================================================================
+
+#define OV7670_ADDR 0x21
+
+// OV7670 Registers
+#define REG_GAIN     0x00
+#define REG_BLUE     0x01
+#define REG_RED      0x02
+#define REG_VREF     0x03
+#define REG_COM1     0x04
+#define REG_BAVE     0x05
+#define REG_GbAVE    0x06
+#define REG_AECHH    0x07
+#define REG_RAVE     0x08
+#define REG_COM2     0x09
+#define  COM2_OUT_DRIVE_4x  0x03
+#define REG_PID      0x0A
+#define REG_VER      0x0B
+#define REG_COM3     0x0C
+#define  COM3_DCWEN         0x04
+#define REG_COM4     0x0D
+#define  COM4_AEC_FULL      0x00
+#define REG_COM5     0x0E
+#define REG_COM6     0x0F
+#define REG_AECH     0x10
+#define REG_CLKRC    0x11
+#define  CLK_RSVD           0x80
+#define REG_COM7     0x12
+#define  COM7_RESET         0x80
+#define  COM7_FMT_QVGA      0x10
+#define  COM7_RGB           0x04
+#define REG_COM8     0x13
+#define  COM8_FASTAEC       0x80
+#define  COM8_AECSTEP       0x40
+#define  COM8_BFILT         0x20
+#define  COM8_RSVD          0x08
+#define  COM8_AGC           0x04
+#define  COM8_AWB           0x02
+#define  COM8_AEC           0x01
+#define REG_COM9     0x14
+#define  COM9_AGC_GAIN_8x   0x20
+#define  COM9_AGC_GAIN_16x  0x30
+#define REG_COM10    0x15
+#define  COM10_PCLK_HB      0x20
+#define  COM10_VS_NEG       0x02
+#define REG_HSTART   0x17
+#define REG_HSTOP    0x18
+#define REG_VSTART   0x19
+#define REG_VSTOP    0x1A
+#define REG_PSHFT    0x1B
+#define REG_MIDH     0x1C
+#define REG_MIDL     0x1D
+#define REG_MVFP     0x1E
+#define REG_ADCCTR0  0x20
+#define REG_AEW      0x24
+#define REG_AEB      0x25
+#define REG_VPT      0x26
+#define REG_BBIAS    0x27
+#define REG_GbBIAS   0x28
+#define REG_EXHCH    0x2A
+#define REG_EXHCL    0x2B
+#define REG_RBIAS    0x2C
+#define REG_ADVFL    0x2D
+#define REG_ADVFH    0x2E
+#define REG_YAVE     0x2F
+#define REG_HSYST    0x30
+#define REG_HSYEN    0x31
+#define REG_HREF     0x32
+#define REG_CHLF     0x33
+#define REG_ARBLM    0x34
+#define REG_ADC      0x37
+#define REG_ACOM     0x38
+#define REG_OFON     0x39
+#define REG_TSLB     0x3A
+#define REG_COM11    0x3B
+#define  COM11_FR_BY_4      0x40
+#define  COM11_EXP          0x02
+#define REG_COM12    0x3C
+#define REG_COM13    0x3D
+#define  COM13_GAMMA        0x80
+#define  COM13_UVSAT        0x40
+#define REG_COM14    0x3E
+#define  COM14_DCWEN        0x10
+#define  COM14_MANUAL       0x08
+#define  COM14_PCLKDIV_2    0x01
+#define REG_EDGE     0x3F
+#define REG_COM15    0x40
+#define  COM15_R00FF        0xC0
+#define  COM15_RGB565       0x10
+#define REG_COM16    0x41
+#define  COM16_YUV_ENHANC   0x08
+#define  COM16_DE_NOISE     0x10
+#define  COM16_AWBGAIN      0x02
+#define REG_COM17    0x42
+#define REG_REG76    0x76
+#define REG_DNSTH    0x4C
+#define REG_MTX1     0x4F
+#define REG_MTX2     0x50
+#define REG_MTX3     0x51
+#define REG_MTX4     0x52
+#define REG_MTX5     0x53
+#define REG_MTX6     0x54
+#define REG_MTXS     0x58
+#define REG_CONTRAS  0x56
+#define REG_SATCTR   0xC9
+#define REG_BRIGHT   0x55
+#define REG_NT_CTRL  0x89
+#define REG_SCALING_XSC      0x70
+#define REG_SCALING_YSC      0x71
+#define REG_SCALING_DCWCTR   0x72
+#define  SCALING_DCWCTR_VDS_by_2 0x01
+#define  SCALING_DCWCTR_HDS_by_2 0x10
+#define REG_SCALING_PCLK_DIV 0x73
+#define  SCALING_PCLK_DIV_RSVD   0xF0
+#define  SCALING_PCLK_DIV_2      0x01
+#define REG_SCALING_PCLK_DELAY 0xA2
+#define REG_DBLV     0x6B
+#define  DBLV_CLK_x4         0x40
+#define REG_RGB444   0x8C
+#define  R444_DISABLE        0x00
+#define REG_SLOP     0x7A
+#define REG_GAM1     0x7B
+#define REG_GAM2     0x7C
+#define REG_GAM3     0x7D
+#define REG_GAM4     0x7E
+#define REG_GAM5     0x7F
+#define REG_GAM6     0x80
+#define REG_GAM7     0x81
+#define REG_GAM8     0x82
+#define REG_GAM9     0x83
+#define REG_GAM10    0x84
+#define REG_GAM11    0x85
+#define REG_GAM12    0x86
+#define REG_GAM13    0x87
+#define REG_GAM14    0x88
+#define REG_GAM15    0x89
+#define REG_BD50MAX  0xA5
+
+struct regval_list {
+  uint8_t reg_num;
+  uint8_t value;
+};
+
+static const struct regval_list qqvga_OV7670[] PROGMEM = {
+  {REG_COM3, COM3_DCWEN},
+  {REG_COM14, COM14_DCWEN | COM14_PCLKDIV_2},
+  {REG_SCALING_XSC, 0x3a},
+  {REG_SCALING_YSC, 0x35},
+  {REG_SCALING_DCWCTR, 0x22},
+  {REG_SCALING_PCLK_DIV, 0xf2},
+  {REG_SCALING_PCLK_DELAY, 0x02},
+  {0xff, 0xff}
+};
+
+static const struct regval_list rgb565_OV7670[] PROGMEM = {
+  {REG_RGB444, 0},
+  {REG_COM1, 0x0},
+  {REG_COM15, COM15_R00FF | COM15_RGB565},
+  {REG_TSLB, 0x04},
+  {REG_COM9, COM9_AGC_GAIN_16x | 0x08},
+  {REG_MTX1, 0xb3},
+  {REG_MTX2, 0xb3},
+  {REG_MTX3, 0},
+  {REG_MTX4, 0x3d},
+  {REG_MTX5, 0xa7},
+  {REG_MTX6, 0xe4},
+  {REG_COM13, COM13_GAMMA | COM13_UVSAT},
+  {0xff, 0xff}
+};
+
+static const struct regval_list OV7670_default2_regs[] PROGMEM = {
+  {REG_TSLB, 0x04},
+  {REG_COM15, COM15_R00FF | COM15_RGB565},
+  {REG_COM7, COM7_FMT_QVGA | COM7_RGB},
+  {REG_HREF, 0x80},
+  {REG_HSTART, 0x16},
+  {REG_HSTOP, 0x04},
+  {REG_VSTART, 0x02},
+  {REG_VSTOP, 0x7b},
+  {REG_VREF, 0x06},
+  {REG_COM3, COM3_DCWEN},
+  {REG_COM14, COM14_DCWEN | COM14_MANUAL | COM14_PCLKDIV_2},
+  {REG_SCALING_XSC, 0x3a},
+  {REG_SCALING_YSC, 0x35},
+  {REG_SCALING_DCWCTR, SCALING_DCWCTR_VDS_by_2 | SCALING_DCWCTR_HDS_by_2},
+  {REG_SCALING_PCLK_DIV, SCALING_PCLK_DIV_RSVD | SCALING_PCLK_DIV_2},
+  {REG_SCALING_PCLK_DELAY, 0x02},
+  {REG_CLKRC, CLK_RSVD | 0x01},
+  {REG_SLOP, 0x20},
+  {REG_GAM1, 0x1c},
+  {REG_GAM2, 0x28},
+  {REG_GAM3, 0x3c},
+  {REG_GAM4, 0x55},
+  {REG_GAM5, 0x68},
+  {REG_GAM6, 0x76},
+  {REG_GAM7, 0x80},
+  {REG_GAM8, 0x88},
+  {REG_GAM9, 0x8f},
+  {REG_GAM10, 0x96},
+  {REG_GAM11, 0xa3},
+  {REG_GAM12, 0xaf},
+  {REG_GAM13, 0xc4},
+  {REG_GAM14, 0xd7},
+  {REG_GAM15, 0xe8},
+  {REG_COM8, COM8_FASTAEC | COM8_AECSTEP | COM8_BFILT},
+  {REG_GAIN, 0x00},
+  {REG_AECH, 0x00},
+  {REG_COM4, COM4_AEC_FULL},
+  {REG_COM9, COM9_AGC_GAIN_8x | 0x08},
+  {REG_BD50MAX, 0x05},
+  {0xff, 0xff}
+};
+
+// I2S/DMA Engine State
+static const size_t s_buf_line_width = (size_t)NVX_FRAME_W * NVX_FRAME_BPP;
+static const size_t s_buf_height     = NVX_FRAME_H;
+static lldesc_t s_dma_desc[2];
+static uint32_t* s_dma_buf[2] = {nullptr, nullptr};
+static uint8_t*  s_fb[2]      = {nullptr, nullptr};
+static volatile int s_fb_idx = 0;
+static intr_handle_t s_i2s_intr_handle = nullptr;
+static SemaphoreHandle_t s_data_ready = nullptr;
+static SemaphoreHandle_t s_line_ready = nullptr;
+static SemaphoreHandle_t s_vsync_catch = nullptr;
+static volatile int s_cur_buffer = 0;
+static volatile uint16_t s_line_count = 0;
+static volatile bool s_i2s_running = false;
+static volatile bool s_vsync_check = false;
+static bool s_cam_initialized = false;
+
+static void IRAM_ATTR VSYNC_isr(void* arg) {
+  GPIO.status1_w1tc.val = (1 << (NVX_CAM_VSYNC - 32));
+  if (s_vsync_check) {
+    BaseType_t hp = pdFALSE;
+    xSemaphoreGiveFromISR(s_vsync_catch, &hp);
+    if (hp) portYIELD_FROM_ISR();
+  }
+}
+
+static inline void i2s_conf_reset() {
+  const uint32_t flags =
+      I2S_RX_RESET_M |
+      I2S_RX_FIFO_RESET_M |
+      I2S_TX_RESET_M |
+      I2S_TX_FIFO_RESET_M;
+
+  I2S0.conf.val |= flags;
+  I2S0.conf.val &= ~flags;
+
+  while (I2S0.state.rx_fifo_reset_back) {
+    ;
+  }
+}
+
+static void i2s_readStart(int buf_idx) {
+  i2s_conf_reset();
+  I2S0.rx_eof_num = s_buf_line_width / 2;
+  I2S0.in_link.addr = (uint32_t)&s_dma_desc[buf_idx];
+  I2S0.in_link.start = 1;
+  I2S0.int_clr.val = I2S0.int_raw.val;
+  I2S0.int_ena.in_done = 1;
+  esp_intr_enable(s_i2s_intr_handle);
+  I2S0.conf.rx_start = 1;
+}
+
+static void i2s_stop() {
+  esp_intr_disable(s_i2s_intr_handle);
+  i2s_conf_reset();
+  I2S0.conf.rx_start = 0;
+  I2S0.in_link.stop = 1;
+  I2S0.int_clr.val = I2S0.int_raw.val;
+  I2S0.int_ena.val = 0;
+  s_i2s_running = false;
+}
+
+static void line_filter_task(void *pvParameters) {
+  for (;;) {
+    xSemaphoreTake(s_data_ready, portMAX_DELAY);
+    const int buf_idx = !s_cur_buffer;
+    s_fb_idx = (s_fb_idx + 1) & 1;
+    uint8_t* dst = s_fb[s_fb_idx];
+    const uint32_t* src = s_dma_buf[buf_idx];
+    for (int i = 0; i < s_buf_line_width / 2; ++i) {
+      uint32_t v = src[i];
+      dst[i * 2 + 0] = (uint8_t)(v & 0x000000FF);
+      dst[i * 2 + 1] = (uint8_t)((v & 0x00FF0000) >> 16);
+    }
+    xSemaphoreGive(s_line_ready);
+  }
+}
+
+static void IRAM_ATTR i2s_isr(void* arg) {
+  I2S0.int_clr.val = I2S0.int_raw.val;
+  s_cur_buffer = !s_cur_buffer;
+  ++s_line_count;
+  if (s_line_count >= s_buf_height) {
+    i2s_stop();
+  } else {
+    i2s_readStart(s_cur_buffer);
+  }
+  BaseType_t hp = pdFALSE;
+  xSemaphoreGiveFromISR(s_data_ready, &hp);
+  if (hp) portYIELD_FROM_ISR();
+}
+
+static bool waitForVsyncStart(uint32_t timeoutMs) {
+  uint32_t start = millis();
+  while (digitalRead(NVX_CAM_VSYNC) == LOW) {
+    if (millis() - start > timeoutMs) return false;
+    delayMicroseconds(50);
+  }
+  start = millis();
+  while (digitalRead(NVX_CAM_VSYNC) == HIGH) {
+    if (millis() - start > timeoutMs) return false;
+    delayMicroseconds(50);
+  }
+  start = millis();
+  while (digitalRead(NVX_CAM_VSYNC) == LOW) {
+    if (millis() - start > timeoutMs) return false;
+    delayMicroseconds(50);
+  }
+  return true;
+}
+
+static void i2s_frameReadStart() {
+  while (xSemaphoreTake(s_vsync_catch, 0) == pdTRUE) {}
+  while (xSemaphoreTake(s_line_ready, 0) == pdTRUE) {}
+  while (xSemaphoreTake(s_data_ready, 0) == pdTRUE) {}
+
+  if (!waitForVsyncStart(2000)) {
+    s_vsync_check = false;
+    DEBUG_PRINTF("[CAM] FRAME START TIMEOUT: VSYNC=%d\n", digitalRead(NVX_CAM_VSYNC));
+    return;
+  }
+  s_vsync_check = false;
+  s_cur_buffer = 0;
+  s_line_count = 0;
+  s_i2s_running = true;
+  i2s_readStart(0);
+}
+
+static uint16_t* camera_getLine(uint16_t lineno) {
+  if (!s_cam_initialized) return nullptr;
+  const uint32_t start = millis();
+  do {
+    if (!s_i2s_running) {
+      s_vsync_check = true;
+      i2s_frameReadStart();
+      if (!s_i2s_running) {
+        s_vsync_check = false;
+        return nullptr;
+      }
+    }
+    if (xSemaphoreTake(s_line_ready, pdMS_TO_TICKS(1500)) != pdTRUE) {
+      if (s_i2s_running) i2s_stop();
+      s_vsync_check = false;
+      return nullptr;
+    }
+    if (millis() - start > 1500) {
+      if (s_i2s_running) i2s_stop();
+      s_vsync_check = false;
+      return nullptr;
+    }
+  } while (lineno != s_line_count);
+
+  return (uint16_t*)s_fb[s_fb_idx];
+}
+
+// SCCB / I2C Helpers
+static void nvxWriteReg(uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(OV7670_ADDR);
+  Wire.write(reg);
+  Wire.write(value);
+  Wire.endTransmission();
+}
+
+static uint8_t nvxReadReg(uint8_t reg) {
+  uint8_t value = 0xFF;
+  Wire.beginTransmission(OV7670_ADDR);
+  Wire.write(reg);
+  Wire.endTransmission(true);
+  delayMicroseconds(80);
+  Wire.requestFrom((uint8_t)OV7670_ADDR, (size_t)1, true);
+  if (Wire.available()) {
+    value = Wire.read();
+  }
+  return value;
+}
+
+static void nvxWriteRegs(const struct regval_list* list) {
+  while (true) {
+    uint8_t r = pgm_read_byte(&list->reg_num);
+    uint8_t v = pgm_read_byte(&list->value);
+    if (r == 0xFF && v == 0xFF) break;
+    nvxWriteReg(r, v);
+    ++list;
+  }
+  delay(10);
+}
+
+static void nvxRewriteCLKRC() {
+  uint8_t v = nvxReadReg(REG_CLKRC);
+  nvxWriteReg(REG_CLKRC, v);
+}
+
+static void nvxSetPCLK(uint8_t pre, uint8_t pll) {
+  uint8_t v = nvxReadReg(REG_CLKRC);
+  nvxWriteReg(REG_CLKRC, (v & 0x80) | pre);
+  v = nvxReadReg(REG_DBLV);
+  nvxWriteReg(REG_DBLV, (v & 0x3F) | pll);
+  nvxRewriteCLKRC();
+}
+
+static void nvxSetHStart(uint16_t hstart) {
+  uint16_t hstop = (hstart + 640) % 784;
+  nvxWriteReg(REG_HSTART, (uint8_t)(hstart / 8));
+  nvxWriteReg(REG_HSTOP,  (uint8_t)(hstop / 8));
+  nvxWriteReg(REG_HREF,   0x80 | (uint8_t)((hstop % 8) << 3) | (uint8_t)(hstart % 8));
+  nvxRewriteCLKRC();
+}
+
+static void nvxSetVStart(uint16_t vstart) {
+  uint16_t vstop = vstart + 480;
+  nvxWriteReg(REG_VSTART, (uint8_t)(vstart / 4));
+  nvxWriteReg(REG_VSTOP,  (uint8_t)(vstop / 4));
+  nvxWriteReg(REG_VREF,   (uint8_t)((vstop % 4) << 2) | (uint8_t)(vstart % 4));
+  nvxRewriteCLKRC();
+}
+
+static void nvxSetResolutionQQVGA() {
+  uint8_t temp = nvxReadReg(REG_COM7);
+  temp &= 0x47;
+  nvxWriteReg(REG_COM7, temp | COM7_FMT_QVGA);
+
+  // Enable 1/2 horizontal + vertical downsampling
+  nvxWriteReg(REG_COM3, COM3_DCWEN);
+  nvxWriteReg(REG_COM14, COM14_DCWEN | COM14_PCLKDIV_2);
+  nvxWriteReg(REG_SCALING_XSC, 0x3A);
+  nvxWriteReg(REG_SCALING_YSC, 0x35);
+
+  // QVGA: divide horizontal and vertical source by 2
+  nvxWriteReg(REG_SCALING_DCWCTR, SCALING_DCWCTR_VDS_by_2 | SCALING_DCWCTR_HDS_by_2);
+
+  // DSP PCLK divider = 2
+  nvxWriteReg(REG_SCALING_PCLK_DIV, SCALING_PCLK_DIV_RSVD | SCALING_PCLK_DIV_2);
+  nvxWriteReg(REG_SCALING_PCLK_DELAY, 0x02);
+
+  // Standard 320x240 OV7670 QVGA window with downsampling (from proven v27/v28):
+  nvxWriteReg(REG_HSTART, 0x16);
+  nvxWriteReg(REG_HSTOP,  0x04);
+  nvxWriteReg(REG_HREF,   0x24);
+  nvxWriteReg(REG_VSTART, 0x02);
+  nvxWriteReg(REG_VSTOP,  0x7A);
+  nvxWriteReg(REG_VREF,   0x0A);
+
+  // Keep XCLK at 10 MHz and sensor PLL at x4
+  nvxSetPCLK(1, DBLV_CLK_x4);
+}
+
+static void nvxSetRGB565() {
+  uint8_t temp = nvxReadReg(REG_COM7) & 0x7A;
+  nvxWriteReg(REG_COM7, temp | COM7_RGB);
+  nvxWriteRegs(rgb565_OV7670);
+  nvxRewriteCLKRC();
+}
+
+static void nvxTuneImageQuality() {
+  nvxWriteReg(REG_COM16, COM16_YUV_ENHANC | COM16_DE_NOISE | COM16_AWBGAIN);
+  nvxWriteReg(REG_EDGE, 0x12);          // modest edge enhancement
+  nvxWriteReg(REG_DNSTH, 0x02);         // light denoise threshold
+  nvxWriteReg(REG_CONTRAS, 0x48);       // slightly stronger contrast
+  nvxWriteReg(REG_SATCTR, 0x68);        // slightly stronger color saturation
+  nvxWriteReg(REG_BRIGHT, 0x00);        // neutral brightness
+
+  uint8_t com8 = nvxReadReg(REG_COM8);
+  com8 |= COM8_AGC | COM8_AWB | COM8_AEC;
+  nvxWriteReg(REG_COM8, com8);
+
+  DEBUG_PRINTLN("[CAM] IMAGE TUNING: contrast+ saturation+ edge+ denoise+ AWB/AGC/AEC");
+}
+
+static esp_err_t dma_desc_init() {
+  const size_t dma_bytes = s_buf_line_width * 2;
+  for (int i = 0; i < 2; ++i) {
+    s_dma_buf[i] = (uint32_t*)malloc(dma_bytes);
+    if (!s_dma_buf[i]) return ESP_ERR_NO_MEM;
+    memset(s_dma_buf[i], 0, dma_bytes);
+    memset(&s_dma_desc[i], 0, sizeof(lldesc_t));
+    s_dma_desc[i].length = dma_bytes;
+    s_dma_desc[i].size = dma_bytes;
+    s_dma_desc[i].owner = 1;
+    s_dma_desc[i].sosf = 1;
+    s_dma_desc[i].buf = (uint8_t*)s_dma_buf[i];
+    s_dma_desc[i].offset = i;
+    s_dma_desc[i].empty = 0;
+    s_dma_desc[i].eof = 1;
+    s_dma_desc[i].qe.stqe_next = nullptr;
+  }
+  return ESP_OK;
+}
+
+static void i2s_init() {
+  gpio_config_t conf = {
+    .pin_bit_mask = 0,
+    .mode = GPIO_MODE_INPUT,
+    .pull_up_en = GPIO_PULLUP_DISABLE,
+    .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    .intr_type = GPIO_INTR_DISABLE
+  };
+
+  const int in_pins[] = {
+    NVX_CAM_D0, NVX_CAM_D1, NVX_CAM_D2, NVX_CAM_D3,
+    NVX_CAM_D4, NVX_CAM_D5, NVX_CAM_D6, NVX_CAM_D7,
+    NVX_CAM_PCLK, NVX_CAM_VSYNC
+  };
+
+  for (int p : in_pins) {
+    conf.pin_bit_mask |= (1ULL << p);
+  }
+  gpio_config(&conf);
+
+  gpio_matrix_in(NVX_CAM_D0, I2S0I_DATA_IN0_IDX, false);
+  gpio_matrix_in(NVX_CAM_D1, I2S0I_DATA_IN1_IDX, false);
+  gpio_matrix_in(NVX_CAM_D2, I2S0I_DATA_IN2_IDX, false);
+  gpio_matrix_in(NVX_CAM_D3, I2S0I_DATA_IN3_IDX, false);
+  gpio_matrix_in(NVX_CAM_D4, I2S0I_DATA_IN4_IDX, false);
+  gpio_matrix_in(NVX_CAM_D5, I2S0I_DATA_IN5_IDX, false);
+  gpio_matrix_in(NVX_CAM_D6, I2S0I_DATA_IN6_IDX, false);
+  gpio_matrix_in(NVX_CAM_D7, I2S0I_DATA_IN7_IDX, false);
+  gpio_matrix_in(NVX_CAM_VSYNC, I2S0I_V_SYNC_IDX, false);
+
+  // HREF disconnected: tie to constant HIGH (0x38)
+  gpio_matrix_in(0x38, I2S0I_H_SYNC_IDX, false);
+  gpio_matrix_in(0x38, I2S0I_H_ENABLE_IDX, false);
+  gpio_matrix_in(NVX_CAM_PCLK, I2S0I_WS_IN_IDX, false);
+
+  periph_module_enable(PERIPH_I2S0_MODULE);
+
+  const uint32_t lc = I2S_IN_RST_S | I2S_AHBM_RST_S | I2S_AHBM_FIFO_RST_S;
+  I2S0.lc_conf.val |= lc;
+  I2S0.lc_conf.val &= ~lc;
+
+  i2s_conf_reset();
+
+  I2S0.conf.rx_slave_mod = 1;
+  I2S0.conf2.lcd_en = 1;
+  I2S0.conf2.camera_en = 1;
+  I2S0.clkm_conf.clkm_div_a = 1;
+  I2S0.clkm_conf.clkm_div_b = 0;
+  I2S0.clkm_conf.clkm_div_num = 2;
+  I2S0.fifo_conf.dscr_en = 1;
+  I2S0.fifo_conf.rx_fifo_mod_force_en = 1;
+  I2S0.fifo_conf.rx_fifo_mod = 1;
+  I2S0.conf_chan.rx_chan_mod = 1;
+  I2S0.sample_rate_conf.rx_bits_mod = 16;
+  I2S0.conf.rx_right_first = 0;
+  I2S0.conf.rx_msb_right = 0;
+  I2S0.conf.rx_msb_shift = 0;
+  I2S0.conf.rx_mono = 0;
+  I2S0.conf.rx_short_sync = 0;
+
+  gpio_set_intr_type((gpio_num_t)NVX_CAM_VSYNC, GPIO_INTR_NEGEDGE);
+  gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+  gpio_isr_handler_add((gpio_num_t)NVX_CAM_VSYNC, VSYNC_isr, nullptr);
+
+  esp_intr_alloc(
+    ETS_I2S0_INTR_SOURCE,
+    ESP_INTR_FLAG_INTRDISABLED | ESP_INTR_FLAG_LEVEL1 | ESP_INTR_FLAG_IRAM,
+    &i2s_isr, nullptr, &s_i2s_intr_handle
+  );
+}
+
+static bool nvxCameraBegin() {
+  pinMode(NVX_CAM_XCLK, OUTPUT);
+  ledcSetup(LEDC_CHANNEL_0, 10000000, 2);
+  ledcAttachPin(NVX_CAM_XCLK, LEDC_CHANNEL_0);
+  ledcWrite(LEDC_CHANNEL_0, 2); // 50% duty clock at 10 MHz
+  delay(20);
+
+  i2s_init();
+
+  s_data_ready  = xSemaphoreCreateBinary();
+  s_line_ready  = xSemaphoreCreateBinary();
+  s_vsync_catch = xSemaphoreCreateBinary();
+
+  if (!s_data_ready || !s_line_ready || !s_vsync_catch) return false;
+
+  for (int i = 0; i < 2; ++i) {
+    s_fb[i] = (uint8_t*)malloc(s_buf_line_width);
+    if (!s_fb[i]) return false;
+    memset(s_fb[i], 0, s_buf_line_width);
+  }
+
+  if (dma_desc_init() != ESP_OK) return false;
+
+  if (xTaskCreatePinnedToCore(
+        line_filter_task, "nvx_line_filter", 3072, nullptr, 9, nullptr, 1
+      ) != pdPASS) {
+    return false;
+  }
+
+  nvxWriteReg(REG_COM7, COM7_RESET);
+  delay(100);
+
+  nvxWriteRegs(OV7670_default2_regs);
+  nvxSetResolutionQQVGA();
+  nvxSetRGB565();
+  nvxTuneImageQuality();
+
+  uint8_t com11 = nvxReadReg(REG_COM11);
+  com11 &= (uint8_t)~0x60;
+  com11 |= COM11_EXP;
+  nvxWriteReg(REG_COM11, com11);
+  nvxSetPCLK(1, DBLV_CLK_x4);
+  nvxWriteReg(REG_COM10, nvxReadReg(REG_COM10) | COM10_VS_NEG);
+  nvxRewriteCLKRC();
+  delay(100);
+
+  const uint8_t pid = nvxReadReg(REG_PID);
+  const uint8_t ver = nvxReadReg(REG_VER);
+  Serial.printf("[OV7670] PID=0x%02X VER=0x%02X\n", pid, ver);
+
+  if (pid == 0xFF && ver == 0xFF) return false;
+
+  s_cam_initialized = true;
+  camera_getLine(NVX_FRAME_H); // Prime one frame
+  return true;
+}
+
+// Direct JPEG TCP Streaming Callback & Frame Sender
+static bool sendAllJPEG(const uint8_t* data, size_t len) {
+  while (len) {
+    if (!cameraTcpClient.connected()) return false;
+    const size_t sent = cameraTcpClient.write(data, len);
+    if (sent == 0) {
+      delay(0);
+      continue;
+    }
+    data += sent;
+    len  -= sent;
+  }
+  return true;
+}
+
+static bool flushJpegTxBuffer() {
+  if (s_jpegTxUsed == 0) return true;
+  if (!sendAllJPEG(s_jpegTxBuf, s_jpegTxUsed)) return false;
+  s_jpegBytesSent += s_jpegTxUsed;
+  s_jpegTxUsed = 0;
+  return true;
+}
+
+static size_t jpegStreamCallbackFixed(void* arg, size_t index, const void* data, size_t len) {
+  (void)arg;
+  (void)index;
+  if (!data || len == 0) return 0;
+  const uint8_t* src = (const uint8_t*)data;
+  const size_t originalLen = len;
+
+  while (len) {
+    const size_t room = NVX_JPEG_TXBUF_BYTES - s_jpegTxUsed;
+    const size_t take = (len < room) ? len : room;
+    memcpy(s_jpegTxBuf + s_jpegTxUsed, src, take);
+    s_jpegTxUsed += take;
+    src += take;
+    len -= take;
+
+    if (s_jpegTxUsed == NVX_JPEG_TXBUF_BYTES) {
+      if (!flushJpegTxBuffer()) {
+        s_jpegCallbackFailed = true;
+        return 0;
+      }
+    }
+  }
+  return originalLen;
+}
+
+bool sendJPEGFrame() {
+  if (!s_jpegInput || !cameraTcpClient.connected()) return false;
+
+  const size_t LINE_BYTES = (size_t)NVX_FRAME_W * NVX_FRAME_BPP;
+
+  for (uint16_t y = 0; y < NVX_FRAME_H; ++y) {
+    uint16_t* line = camera_getLine(y + 1);
+    if (!line) {
+      DEBUG_PRINTF("[CAM] CAPTURE FAIL line=%u\n", (unsigned)y);
+      return false;
+    }
+    memcpy(s_jpegInput + (size_t)y * LINE_BYTES, line, LINE_BYTES);
+  }
+
+  // Swap byte endianness for fmt2jpg_cb
+  for (size_t i = 0; i < NVX_FRAME_BYTES; i += 2) {
+    const uint8_t t = s_jpegInput[i];
+    s_jpegInput[i]   = s_jpegInput[i + 1];
+    s_jpegInput[i + 1] = t;
+  }
+
+  const uint32_t id = cameraFrameId++;
+
+  // 18-byte NVJ2 Packet Header
+  uint8_t header[18] = {
+    'N','V','J','2',
+    (uint8_t)(NVX_FRAME_W),
+    (uint8_t)(NVX_FRAME_W >> 8),
+    (uint8_t)(NVX_FRAME_H),
+    (uint8_t)(NVX_FRAME_H >> 8),
+    2, 0,
+    (uint8_t)id,
+    (uint8_t)(id >> 8),
+    (uint8_t)(id >> 16),
+    (uint8_t)(id >> 24),
+    0xFF, 0xFF, 0xFF, 0xFF
+  };
+
+  if (!sendAllJPEG(header, sizeof(header))) return false;
+
+  s_jpegTxUsed = 0;
+  s_jpegBytesSent = 0;
+  s_jpegCallbackFailed = false;
+
+  const bool encoded = fmt2jpg_cb(
+    s_jpegInput,
+    NVX_FRAME_BYTES,
+    NVX_FRAME_W,
+    NVX_FRAME_H,
+    PIXFORMAT_RGB565,
+    JPEG_QUALITY,
+    jpegStreamCallbackFixed,
+    nullptr
+  );
+
+  if (!encoded || s_jpegCallbackFailed) return false;
+  if (!flushJpegTxBuffer()) return false;
+
+  ++cameraFramesSent;
+  const uint32_t now = millis();
+  if (now - cameraFpsStart >= 1000) {
+    const float fps = cameraFramesSent * 1000.0f / (float)(now - cameraFpsStart);
+    DEBUG_PRINTF("[CAM] JPEG 160x120 | Q=%u | %lu B | %.1f FPS | id=%lu\n",
+      JPEG_QUALITY, (unsigned long)s_jpegBytesSent, fps, (unsigned long)id);
+    cameraFramesSent = 0;
+    cameraFpsStart = now;
+  }
+
+  return true;
+}
+
+void stepCameraService() {
+  if (!cameraAvailable) return;
+
+  if (cameraTcpClient && cameraTcpClient.connected()) {
+    if (!sendJPEGFrame()) {
+      DEBUG_PRINTLN("[CAM] Client disconnected.");
+      cameraTcpClient.stop();
+    }
+    return;
+  }
+
+  if (cameraTcpClient) cameraTcpClient.stop();
+
+  WiFiClient incoming = cameraTcpServer.available();
+  if (incoming) {
+    incoming.setNoDelay(true);
+    incoming.setTimeout(1000);
+    cameraTcpClient = incoming;
+    cameraFrameId = 0;
+    cameraFramesSent = 0;
+    cameraFpsStart = millis();
+    DEBUG_PRINTLN("[CAM] Client connected on TCP port 5000!");
+  }
+}
+
+// ===================================================================================
+// 5. 74HC595 LED SHIFT REGISTER DRIVER
 // ===================================================================================
 void write595(uint8_t value) {
   digitalWrite(LED_LATCH, LOW);
   shiftOut(LED_DATA, LED_CLOCK, MSBFIRST, value);
   digitalWrite(LED_LATCH, HIGH);
+  currentLedMask = value;
 }
 
+void updateLEDs() {
+  unsigned long now = millis();
+
+  if (currentLedEffect == "off") {
+    if (currentLedMask != 0x00) write595(0x00);
+    return;
+  }
+
+  if (currentLedEffect == "blink") {
+    if (now - lastLedUpdateMs >= 250) {
+      lastLedUpdateMs = now;
+      write595(currentLedMask == 0x00 ? 0xFF : 0x00);
+    }
+  } else if (currentLedEffect == "warn") {
+    if (now - lastLedUpdateMs >= 120) {
+      lastLedUpdateMs = now;
+      write595(currentLedMask == 0x00 ? 0xAA : (currentLedMask == 0xAA ? 0x55 : 0x00));
+    }
+  } else if (currentLedEffect == "pulse") {
+    if (now - lastLedUpdateMs >= 70) {
+      lastLedUpdateMs = now;
+      static uint8_t pulseStep = 0;
+      static const uint8_t pulseTable[8] = { 0x00, 0x18, 0x3C, 0x7E, 0xFF, 0x7E, 0x3C, 0x18 };
+      write595(pulseTable[pulseStep]);
+      pulseStep = (pulseStep + 1) % 8;
+    }
+  }
+}
+
+// ===================================================================================
+// 6. LOW-LEVEL MOTOR DRIVER & SLEW CONTROLLER
+// ===================================================================================
 void initPins() {
-  pinMode(MOTOR_IN1, OUTPUT); analogWrite(MOTOR_IN1, 0);
-  pinMode(MOTOR_IN2, OUTPUT); analogWrite(MOTOR_IN2, 0);
-  pinMode(MOTOR_IN3, OUTPUT); analogWrite(MOTOR_IN3, 0);
-  pinMode(MOTOR_IN4, OUTPUT); analogWrite(MOTOR_IN4, 0);
-  pinMode(TRIG_PIN, OUTPUT); digitalWrite(TRIG_PIN, LOW);
+  // Motor LEDC PWM channels
+  ledcSetup(LEDC_CH_IN1, MOTOR_PWM_FREQ, MOTOR_PWM_RES);
+  ledcAttachPin(MOTOR_IN1, LEDC_CH_IN1);
+  ledcWrite(LEDC_CH_IN1, 0);
+
+  ledcSetup(LEDC_CH_IN2, MOTOR_PWM_FREQ, MOTOR_PWM_RES);
+  ledcAttachPin(MOTOR_IN2, LEDC_CH_IN2);
+  ledcWrite(LEDC_CH_IN2, 0);
+
+  ledcSetup(LEDC_CH_IN3, MOTOR_PWM_FREQ, MOTOR_PWM_RES);
+  ledcAttachPin(MOTOR_IN3, LEDC_CH_IN3);
+  ledcWrite(LEDC_CH_IN3, 0);
+
+  ledcSetup(LEDC_CH_IN4, MOTOR_PWM_FREQ, MOTOR_PWM_RES);
+  ledcAttachPin(MOTOR_IN4, LEDC_CH_IN4);
+  ledcWrite(LEDC_CH_IN4, 0);
+
+  // Sonar pins
+  pinMode(TRIG_PIN, OUTPUT);
+  digitalWrite(TRIG_PIN, LOW);
   pinMode(ECHO_PIN, INPUT);
-  pinMode(LED_DATA,  OUTPUT); digitalWrite(LED_DATA,  LOW);
+
+  // 74HC595 pins
+  pinMode(LED_DATA, OUTPUT);  digitalWrite(LED_DATA, LOW);
   pinMode(LED_CLOCK, OUTPUT); digitalWrite(LED_CLOCK, LOW);
   pinMode(LED_LATCH, OUTPUT); digitalWrite(LED_LATCH, LOW);
   write595(0x00);
 }
 
-void motorWrite(int pinF, int pinB, int pwm) {
+void motorWrite(int chF, int chB, int pwm) {
   pwm = constrain(pwm, -255, 255);
   if (pwm > 0) {
-    analogWrite(pinF, pwm);
-    analogWrite(pinB, 0);
+    ledcWrite(chF, pwm);
+    ledcWrite(chB, 0);
   } else if (pwm < 0) {
-    analogWrite(pinF, 0);
-    analogWrite(pinB, -pwm);
+    ledcWrite(chF, 0);
+    ledcWrite(chB, -pwm);
   } else {
-    analogWrite(pinF, 0);
-    analogWrite(pinB, 0);
+    ledcWrite(chF, 0);
+    ledcWrite(chB, 0);
   }
 }
 
-// Slew-rate ramping: smooths rapid acceleration to prevent power rail brownout & Wi-Fi disconnect
 void stepMotorRamp() {
   unsigned long now = millis();
   if (now - lastMotorRampMs < 10) return;
   lastMotorRampMs = now;
 
-  const int RAMP_STEP = 35; // Ramps 0 to 255 in ~70ms — stops inrush voltage collapse!
+  const int RAMP_STEP = 35;
 
   if (currentPwmLeft < targetPwmLeft) {
     currentPwmLeft = min(currentPwmLeft + RAMP_STEP, targetPwmLeft);
@@ -237,17 +1144,18 @@ void stepMotorRamp() {
     currentPwmRight = max(currentPwmRight - RAMP_STEP, targetPwmRight);
   }
 
-  motorWrite(MOTOR_IN1, MOTOR_IN2, currentPwmLeft);
-  motorWrite(MOTOR_IN3, MOTOR_IN4, currentPwmRight);
+  motorWrite(LEDC_CH_IN1, LEDC_CH_IN2, currentPwmLeft);
+  motorWrite(LEDC_CH_IN3, LEDC_CH_IN4, currentPwmRight);
 }
 
 void stopCar() {
+  rotateState     = ROT_IDLE;
   targetPwmLeft   = 0;
   targetPwmRight  = 0;
   currentPwmLeft  = 0;
   currentPwmRight = 0;
-  motorWrite(MOTOR_IN1, MOTOR_IN2, 0);
-  motorWrite(MOTOR_IN3, MOTOR_IN4, 0);
+  motorWrite(LEDC_CH_IN1, LEDC_CH_IN2, 0);
+  motorWrite(LEDC_CH_IN3, LEDC_CH_IN4, 0);
   motorRunning = false;
 }
 
@@ -275,7 +1183,9 @@ void motorMix(float turn, float speed) {
   lastDriveCmdMs = millis();
 }
 
-// Ultrasonic with Noise Filtering & Stuck-Pin Guard
+// ===================================================================================
+// 7. ULTRASONIC & SG90 RADAR SERVO
+// ===================================================================================
 long readUltrasonicCM() {
   if (!sonarActive) return 400;
   unsigned long now = millis();
@@ -283,34 +1193,30 @@ long readUltrasonicCM() {
     return sonarCacheValue;
   }
 
-  // Ensure ECHO pin is not stuck HIGH before triggering
   if (digitalRead(ECHO_PIN) == HIGH) {
     unsigned long waitStart = micros();
-    while (digitalRead(ECHO_PIN) == HIGH && (micros() - waitStart < 2000));
+    while (digitalRead(ECHO_PIN) == HIGH && (micros() - waitStart < 2000)) yield();
   }
 
-  // Clean trigger pulse
   digitalWrite(TRIG_PIN, LOW);
   delayMicroseconds(4);
   digitalWrite(TRIG_PIN, HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
 
-  // Measure echo pulse (20000us timeout = ~3.4m max range)
-  unsigned long duration = pulseIn(ECHO_PIN, HIGH, 20000);
+  unsigned long duration = pulseIn(ECHO_PIN, HIGH, 25000);
   static int consecutiveFails = 0;
 
-  if (duration == 0 || duration >= 20000) {
+  if (duration == 0 || duration >= 25000) {
     consecutiveFails++;
-    // Only set to 400 after 2 consecutive timeouts to eliminate flickering spikes
-    if (consecutiveFails >= 2) {
-      sonarCacheValue = 400;
-    }
+    if (consecutiveFails >= 2) sonarCacheValue = 400;
+  } else if (duration < 120) {
+    consecutiveFails++;
+    if (consecutiveFails >= 4) sonarCacheValue = 2;
   } else {
     consecutiveFails = 0;
     long cm = (long)(duration / 58.2f);
     if (cm >= 2 && cm <= 400) {
-      // Gentle smoothing if previous reading was valid
       if (sonarCacheValue > 0 && sonarCacheValue < 400) {
         sonarCacheValue = (long)(sonarCacheValue * 0.25f + cm * 0.75f);
       } else {
@@ -320,6 +1226,7 @@ long readUltrasonicCM() {
       sonarCacheValue = 400;
     }
   }
+
   sonarCacheTime = now;
   return sonarCacheValue;
 }
@@ -328,220 +1235,145 @@ void invalidateSonarCache() {
   sonarCacheTime = 0;
 }
 
-// Servo Motor Head Control (Kept continuously attached to avoid timer/channel exhaustion)
 void setRadarServo(int angle) {
   angle = constrain(angle, 0, 180);
   if (!radarServo.attached()) {
-    radarServo.attach(SERVO_PIN, 500, 2400);
+    radarServo.attach(SERVO_PIN, 544, 2400);
   }
   radarServo.write(angle);
 }
 
-// Radar Sweeper State Machine
 void startRadarScan() {
   radarState        = SCAN_RUNNING;
   radarCurrentAngle = -90;
   radarStepDir      = 1;
   invalidateSonarCache();
-  setRadarServo(0); // -90 deg maps to 0 deg
+  setRadarServo(0);
   lastRadarStepMs   = millis();
 }
 
 void stepRadarScan() {
   if (radarState != SCAN_RUNNING) return;
   unsigned long now = millis();
-  if (now - lastRadarStepMs < 130) return; // 130ms settle time per step for physical servo motion
+  if (now - lastRadarStepMs < 130) return;
   lastRadarStepMs = now;
 
-  int servoAngle = radarCurrentAngle + 90; // -90..90 -> 0..180
+  int servoAngle = radarCurrentAngle + 90;
   setRadarServo(servoAngle);
-
   invalidateSonarCache();
   long dist = readUltrasonicCM();
 
   broadcastWsText("{\"type\":\"radar\",\"angle\":" + String(radarCurrentAngle)
                   + ",\"distance\":" + String(dist) + "}");
 
-  if (radarCurrentAngle == -90)      scanDistLeft  = (int)dist;
-  else if (radarCurrentAngle == 0)   scanDistFront = (int)dist;
-  else if (radarCurrentAngle == 90)  scanDistRight = (int)dist;
+  if (radarCurrentAngle == -90)     scanDistLeft  = (int)dist;
+  else if (radarCurrentAngle == 0)  scanDistFront = (int)dist;
+  else if (radarCurrentAngle == 90) scanDistRight = (int)dist;
 
   radarCurrentAngle += 30;
   if (radarCurrentAngle > 90) {
-    setRadarServo(90); // Return to center position (stays attached!)
+    setRadarServo(90);
     radarState = SCAN_DONE;
-
     broadcastWsText("{\"type\":\"radar_summary\",\"left\":" + String(scanDistLeft)
                     + ",\"front\":" + String(scanDistFront)
                     + ",\"right\":" + String(scanDistRight) + ",\"done\":true}");
   }
 }
 
-// 74HC595 LED Animation Patterns
-void updateLEDs() {
-  unsigned long now = millis();
-  if (currentLedEffect == "off") {
-    write595(0x00);
-  } else if (currentLedEffect == "blink") {
-    if (now - lastLedUpdateMs > 300) {
-      lastLedUpdateMs = now;
-      static bool toggle = false;
-      toggle = !toggle;
-      write595(toggle ? 0xFF : 0x00);
-    }
-  } else if (currentLedEffect == "warn") {
-    if (now - lastLedUpdateMs > 150) {
-      lastLedUpdateMs = now;
-      static bool warnToggle = false;
-      warnToggle = !warnToggle;
-      write595(warnToggle ? 0xAA : 0x55);
-    }
-  } else if (currentLedEffect == "pulse") {
-    if (now - lastLedUpdateMs > 80) {
-      lastLedUpdateMs = now;
-      static uint8_t pulsePos = 0;
-      pulsePos = (pulsePos + 1) % 8;
-      write595(1 << pulsePos);
+// ===================================================================================
+// 8. MPU6050 ATTITUDE & GYRO
+// ===================================================================================
+
+bool scanI2CBus() {
+  Serial.println("[I2C] Scanning GPIO21 (SDA) / GPIO22 (SCL)...");
+  int nDevices = 0;
+  bool ovFound  = false;
+  bool mpuFound = false;
+
+  for (uint8_t address = 1; address < 127; ++address) {
+    Wire.beginTransmission(address);
+    uint8_t error = Wire.endTransmission(true);
+    if (error == 0) {
+      Serial.printf("[I2C] Device found at 0x%02X", address);
+      if (address == 0x21) {
+        Serial.print(" (OV7670 Camera SCCB)");
+        ovFound = true;
+      } else if (address == 0x68) {
+        Serial.print(" (MPU6050 IMU - AD0=GND)");
+        mpuFound = true;
+      } else if (address == 0x69) {
+        Serial.print(" (MPU6050 IMU - AD0=VCC/Floating)");
+        mpuFound = true;
+      }
+      Serial.println();
+      nDevices++;
     }
   }
+
+  if (nDevices == 0) {
+    Serial.println("[I2C] WARNING: No I2C devices acknowledged!");
+    Serial.println("[I2C] Ensure 3.3V power & 4.7k pull-ups on GPIO 21 (SDA) and GPIO 22 (SCL).");
+  } else {
+    Serial.printf("[I2C] Scan complete: %d device(s) found.\n", nDevices);
+    if (ovFound && !mpuFound) {
+      Serial.println("[I2C] Notice: Camera (0x21) detected, but MPU6050 did NOT respond.");
+      Serial.println("[I2C] Check MPU6050 VCC, GND, SDA, and SCL wiring.");
+    }
+  }
+
+  return mpuFound;
 }
 
-// ===================================================================================
-// 5. MPU6050 GYROSCOPE, ATTITUDE & CALIBRATION (WITH AUTO I2C BUS SCAN)
-// ===================================================================================
 void calibrateGyro() {
+  if (!mpuAvailable) return;
   stopCar();
-  delay(100);
-  float sumZ  = 0;
-  int samples = 200;
-  for (int i = 0; i < samples; i++) {
+  Serial.println("[MPU6050] Calibrating zero-rate bias...");
+  delay(500);
+
+  float sumZ = 0.0f;
+  for (int i = 0; i < 250; i++) {
     sensors_event_t a, g, temp;
     mpu.getEvent(&a, &g, &temp);
     sumZ += g.gyro.z;
     delay(2);
+    yield();
   }
-  gyroZBias      = sumZ / (float)samples;
+
+  gyroZBias      = sumZ / 250.0f;
   yawHeading     = 0.0f;
   pitchAngle     = 0.0f;
   rollAngle      = 0.0f;
   lastGyroMicros = micros();
-  Serial.printf("[MPU6050] Calibrated. Zero bias: %.4f rad/s\n", gyroZBias);
-}
 
-bool tryInitMPUAt(uint8_t addr) {
-  Wire.beginTransmission(addr);
-  byte err = Wire.endTransmission();
-  if (err != 0) return false;
-
-  Serial.printf("[MPU6050] ACK at 0x%02X! Waking up & reading WHO_AM_I...\n", addr);
-
-  // Wake up device: write 0x00 to PWR_MGMT_1 register (0x6B)
-  Wire.beginTransmission(addr);
-  Wire.write(0x6B);
-  Wire.write(0x00);
-  Wire.endTransmission();
-  delay(10);
-
-  // Read WHO_AM_I register (0x75)
-  Wire.beginTransmission(addr);
-  Wire.write(0x75);
-  Wire.endTransmission(false);
-  Wire.requestFrom((uint8_t)addr, (uint8_t)1);
-  if (Wire.available()) {
-    uint8_t whoami = Wire.read();
-    Serial.printf("[MPU6050] Chip WHO_AM_I register = 0x%02X\n", whoami);
-  }
-
-  if (mpu.begin(addr, &Wire)) {
-    mpuI2cAddress = addr;
-    mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
-    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-    calibrateGyro();
-    mpuAvailable = true;
-    Serial.printf("[MPU6050] Succeeded on address 0x%02X! Calibrated & Ready.\n", addr);
-    return true;
-  } else {
-    Serial.printf("[MPU6050] ACK at 0x%02X but mpu.begin() failed.\n", addr);
-    return false;
-  }
+  Serial.printf("[MPU6050] Gyro Z Bias = %.6f rad/s\n", gyroZBias);
 }
 
 void initMPU() {
-  // Configure internal pullups on I2C lines
-  pinMode(MPU_SDA, INPUT_PULLUP);
-  pinMode(MPU_SCL, INPUT_PULLUP);
-  delay(80); // Allow 5V booster rail to settle
+  Serial.println("\n[MPU6050] Initializing...");
+  uint8_t foundAddr = 0;
 
-  // Unwedge stuck I2C bus if slave held SDA low
-  pinMode(MPU_SCL, OUTPUT);
-  for (int i = 0; i < 9; i++) {
-    digitalWrite(MPU_SCL, HIGH);
-    delayMicroseconds(5);
-    digitalWrite(MPU_SCL, LOW);
-    delayMicroseconds(5);
-  }
-  pinMode(MPU_SCL, INPUT_PULLUP);
-  delay(15);
-
-  // 1. Try standard pins: SDA=21, SCL=22
-  Wire.begin(MPU_SDA, MPU_SCL, 100000);
-  Wire.setTimeOut(50); // Prevent bus lockup from stalling main loop
-
-  const uint8_t TARGET_ADDRS[] = { 0x68, 0x69 };
-
-  for (int attempt = 1; attempt <= 3; attempt++) {
-    for (int i = 0; i < 2; i++) {
-      uint8_t addr = TARGET_ADDRS[i];
-      Serial.printf("[MPU6050] Probing 0x%02X on SDA=21, SCL=22 (attempt %d)...\n", addr, attempt);
-      if (tryInitMPUAt(addr)) return;
-    }
-    delay(50);
-  }
-
-  // 2. What if SDA and SCL are swapped? Test SDA=22, SCL=21!
-  Serial.println("[MPU6050] Standard pins didn't answer. Testing if SDA & SCL are swapped (SDA=22, SCL=21)...");
-  Wire.end();
-  pinMode(22, INPUT_PULLUP);
-  pinMode(21, INPUT_PULLUP);
-  delay(20);
-  Wire.begin(22, 21, 100000);
-  Wire.setTimeOut(50);
-
-  for (int i = 0; i < 2; i++) {
-    uint8_t addr = TARGET_ADDRS[i];
-    Serial.printf("[MPU6050] Probing 0x%02X on swapped pins SDA=22, SCL=21...\n", addr);
-    if (tryInitMPUAt(addr)) {
-      Serial.println("[MPU6050] >>> SUCCESS ON SWAPPED PINS! (SDA=GPIO22, SCL=GPIO21) <<<");
-      return;
+  if (mpu.begin(0x68, &Wire)) {
+    foundAddr = 0x68;
+  } else {
+    delay(20);
+    if (mpu.begin(0x69, &Wire)) {
+      foundAddr = 0x69;
     }
   }
 
-  // 3. Restore standard pins and do full 7-bit bus scan
-  Wire.end();
-  pinMode(MPU_SDA, INPUT_PULLUP);
-  pinMode(MPU_SCL, INPUT_PULLUP);
-  Wire.begin(MPU_SDA, MPU_SCL, 100000);
-  Wire.setTimeOut(50);
-
-  Serial.println("[MPU6050] Scanning entire I2C bus (0x01..0x7F)...");
-  int found = 0;
-  for (uint8_t a = 1; a < 127; a++) {
-    Wire.beginTransmission(a);
-    if (Wire.endTransmission() == 0) {
-      Serial.printf("[I2C] Device ACK at 0x%02X\n", a);
-      found++;
-      if (tryInitMPUAt(a)) return;
-    }
-  }
-
-  mpuAvailable = false;
-  Serial.println("[MPU6050] Not detected on I2C bus.");
-  if (found == 0) {
-    Serial.println("[MPU6050] TROUBLESHOOTING CHECKLIST:");
-    Serial.println("  1. Booster GND MUST be connected to ESP32 GND (Common Ground required)!");
-    Serial.println("  2. Check MPU VCC has 5V (or 3.3V).");
-    Serial.println("  3. Check SDA to GPIO 21, SCL to GPIO 22.");
+  if (foundAddr == 0) {
+    mpuAvailable = false;
+    Serial.println("[MPU6050] NOT DETECTED at 0x68 or 0x69");
+    Serial.println("[MPU6050] GYRO: OFF (Operating in dead-reckoning fallback mode)");
+  } else {
+    mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+    mpuAvailable = true;
+    Serial.printf("[MPU6050] DETECTED at 0x%02X\n", foundAddr);
+    Serial.println("[MPU6050] Range: +/-8G | Gyro: +/-500 DPS");
+    calibrateGyro();
+    Serial.println("[MPU6050] READY");
   }
 }
 
@@ -549,30 +1381,38 @@ void updateGyroHeading() {
   if (!mpuAvailable) return;
   sensors_event_t a, g, temp;
   mpu.getEvent(&a, &g, &temp);
+
+  rawAX = a.acceleration.x;
+  rawAY = a.acceleration.y;
+  rawAZ = a.acceleration.z;
+  rawGX = g.gyro.x;
+  rawGY = g.gyro.y;
+  rawGZ = g.gyro.z;
+
   unsigned long nowUs = micros();
   float dt = (nowUs - lastGyroMicros) / 1000000.0f;
   lastGyroMicros = nowUs;
-  if (dt <= 0 || dt > 0.2f) return;
+
+  if (dt <= 0.0f || dt > 0.2f) return;
 
   // Integrated Yaw
-  float rateZ = g.gyro.z - gyroZBias;
+  float rateZ = rawGZ - gyroZBias;
+#if GYRO_REVERSE_Z
+  rateZ = -rateZ;
+#endif
+
   yawHeading += rateZ * 57.2957795f * dt;
   while (yawHeading <    0.0f) yawHeading += 360.0f;
   while (yawHeading >= 360.0f) yawHeading -= 360.0f;
 
   // Accelerometer Pitch & Roll
-  float ax = a.acceleration.x;
-  float ay = a.acceleration.y;
-  float az = a.acceleration.z;
-  float rawPitch = atan2(ay, sqrt(ax * ax + az * az)) * 57.2957795f;
-  float rawRoll  = atan2(-ax, az) * 57.2957795f;
+  float rawPitch = atan2(rawAY, sqrt(rawAX * rawAX + rawAZ * rawAZ)) * 57.2957795f;
+  float rawRoll  = atan2(-rawAX, rawAZ) * 57.2957795f;
 
-  // Low-pass smooth filter
   pitchAngle = pitchAngle * 0.85f + rawPitch * 0.15f;
   rollAngle  = rollAngle  * 0.85f + rawRoll  * 0.15f;
 }
 
-// Non-blocking gyro rotate state
 void startNonBlockingRotate(float targetDeg, bool turnRight) {
   int pwm = TURN_SPEED_PWM;
   if (turnRight) {
@@ -586,19 +1426,25 @@ void startNonBlockingRotate(float targetDeg, bool turnRight) {
   rotateTarget    = targetDeg;
   rotateTurnRight = turnRight;
   rotateInitYaw   = yawHeading;
+  rotatePrevYaw   = yawHeading;
+  rotateAccumYaw  = 0.0f;
   rotateStartMs   = millis();
   motorRunning    = true;
 }
 
 void stepNonBlockingRotate() {
   if (rotateState != ROT_TURNING) return;
-  lastDriveCmdMs = millis(); // Keep watchdog happy
+  lastDriveCmdMs = millis();
 
   bool finished = false;
   if (mpuAvailable) {
-    float diff = fabs(yawHeading - rotateInitYaw);
-    if (diff > 180.0f) diff = 360.0f - diff;
-    if (diff >= rotateTarget || (millis() - rotateStartMs > 5000)) {
+    float delta = yawHeading - rotatePrevYaw;
+    if (delta > 180.0f) delta -= 360.0f;
+    else if (delta < -180.0f) delta += 360.0f;
+    rotateAccumYaw += fabs(delta);
+    rotatePrevYaw = yawHeading;
+
+    if (rotateAccumYaw >= rotateTarget || (millis() - rotateStartMs > 8000)) {
       finished = true;
     }
   } else {
@@ -614,18 +1460,16 @@ void stepNonBlockingRotate() {
 }
 
 // ===================================================================================
-// 6. AUTONOMOUS COLLISION AVOIDANCE STATE MACHINE
+// 9. AUTONOMOUS COLLISION AVOIDANCE
 // ===================================================================================
 void stepAutoNav() {
   if (manualMode || carStopped) return;
-  if (!sonarActive) { stopCar(); return; }
-
   unsigned long now = millis();
-  long frontDist = readUltrasonicCM();
 
   switch (autoState) {
-    case AUTO_FORWARD:
-      if (frontDist < OBSTACLE_LIMIT_CM && frontDist > 0) {
+    case AUTO_FORWARD: {
+      long d = readUltrasonicCM();
+      if (d > 0 && d < OBSTACLE_LIMIT_CM) {
         stopCar();
         autoState = AUTO_DETECTED;
         autoActionTimer = now;
@@ -633,272 +1477,354 @@ void stepAutoNav() {
         motorMix(0.0f, (float)CRUISE_SPEED_PWM / 255.0f);
       }
       break;
-
-    case AUTO_DETECTED:
-      motorMix(0.0f, -0.6f); // back up briefly
-      autoState = AUTO_REVERSE;
-      autoActionTimer = now;
-      break;
-
-    case AUTO_REVERSE:
-      if (now - autoActionTimer > 250) {
-        stopCar();
+    }
+    case AUTO_DETECTED: {
+      stopCar();
+      if (now - autoActionTimer >= 200) {
+        startRadarScan();
         autoState = AUTO_SCAN;
-        autoActionTimer = now;
-        setRadarServo(150);
       }
       break;
-
-    case AUTO_SCAN:
-      // Sweep Left (150 deg) then Right (30 deg)
-      setRadarServo(150);
-      delay(220);
-      invalidateSonarCache();
-      scanDistLeft = readUltrasonicCM();
-
-      setRadarServo(30);
-      delay(240);
-      invalidateSonarCache();
-      scanDistRight = readUltrasonicCM();
-
-      setRadarServo(90);
-      delay(180);
-
-      if (scanDistLeft > scanDistRight && scanDistLeft > 25) {
-        startNonBlockingRotate(60.0f, false);
-      } else if (scanDistRight > 25) {
-        startNonBlockingRotate(60.0f, true);
-      } else {
-        startNonBlockingRotate(160.0f, true);
+    }
+    case AUTO_SCAN: {
+      stepRadarScan();
+      if (radarState == SCAN_DONE) {
+        if (scanDistLeft > scanDistRight && scanDistLeft > OBSTACLE_LIMIT_CM) {
+          startNonBlockingRotate(60.0f, false);
+        } else if (scanDistRight >= scanDistLeft && scanDistRight > OBSTACLE_LIMIT_CM) {
+          startNonBlockingRotate(60.0f, true);
+        } else {
+          startNonBlockingRotate(120.0f, true);
+        }
+        autoState = AUTO_TURN;
       }
-      autoState = AUTO_TURN;
       break;
-
-    case AUTO_TURN:
+    }
+    case AUTO_TURN: {
       if (rotateState == ROT_IDLE) {
         autoState = AUTO_FORWARD;
       }
       break;
-
-    case AUTO_STOPPED:
+    }
     default:
-      stopCar();
       break;
   }
 }
 
 // ===================================================================================
-// 7. RFC 6455 WEBSOCKET ENGINE (PORT 81)
+// 10. WEBSOCKET PROTOCOL ENGINE
 // ===================================================================================
-String computeWsAccept(const String& clientKey) {
-  String combined = clientKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-  unsigned char sha1Result[20];
-  mbedtls_sha1_context shaCtx;
-  mbedtls_sha1_init(&shaCtx);
-  mbedtls_sha1_starts(&shaCtx);
-  mbedtls_sha1_update(&shaCtx, (const unsigned char*)combined.c_str(), combined.length());
-  mbedtls_sha1_finish(&shaCtx, sha1Result);
-  mbedtls_sha1_free(&shaCtx);
-
-  unsigned char base64Buf[40];
-  size_t outLen = 0;
-  mbedtls_base64_encode(base64Buf, sizeof(base64Buf), &outLen, sha1Result, 20);
-  base64Buf[outLen] = '\0';
-  return String((char*)base64Buf);
-}
-
-void sendWsFrame(WiFiClient& client, const String& text) {
-  if (!client.connected()) return;
-  size_t len = text.length();
-  client.write(0x81); // FIN + text opcode
-  if (len <= 125) {
-    client.write((uint8_t)len);
-  } else if (len <= 65535) {
-    client.write(126);
-    client.write((uint8_t)(len >> 8));
-    client.write((uint8_t)(len & 0xFF));
-  }
-  client.print(text);
+static String computeWsAccept(const String& key) {
+  String combined = key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+  uint8_t digest[20];
+  mbedtls_sha1((const unsigned char*)combined.c_str(), combined.length(), digest);
+  char out[32];
+  size_t n = 0;
+  mbedtls_base64_encode((unsigned char*)out, sizeof(out), &n, digest, sizeof(digest));
+  out[n] = '\0';
+  return String(out);
 }
 
 void broadcastWsText(const String& payload) {
+  size_t len = payload.length();
+  uint8_t frame[10];
+  size_t hLen = 0;
+  frame[0] = 0x81;
+  if (len < 126) {
+    frame[1] = (uint8_t)len;
+    hLen = 2;
+  } else {
+    frame[1] = 126;
+    frame[2] = (uint8_t)(len >> 8);
+    frame[3] = (uint8_t)(len & 0xFF);
+    hLen = 4;
+  }
+
   for (int i = 0; i < MAX_WS_CLIENTS; i++) {
     if (wsClients[i] && wsClients[i].connected()) {
-      sendWsFrame(wsClients[i], payload);
+      wsClients[i].write(frame, hLen);
+      wsClients[i].write((const uint8_t*)payload.c_str(), len);
     }
   }
 }
 
 void handleWsMessage(WiFiClient& client, const String& msg) {
-  // --- DRIVE MOVE ---
-  if (msg.indexOf("\"type\":\"move\"") >= 0) {
-    if (!manualMode || carStopped) return;
-    int dirIdx = msg.indexOf("\"dir\":\"");
-    if (dirIdx >= 0) {
-      char dir = msg.charAt(dirIdx + 7);
-      int spdIdx = msg.indexOf("\"speed\":");
-      int spd = (spdIdx >= 0) ? msg.substring(spdIdx + 8).toInt() : CRUISE_SPEED_PWM;
-      spd = constrain(spd, 0, 255);
-      float spdNorm = (float)spd / 255.0f;
+  // 1. JSON Frame Handling (Primary for NovaX App / app.js)
+  if (msg.startsWith("{") && msg.endsWith("}")) {
+    int tIdx = msg.indexOf("\"type\":");
+    if (tIdx != -1) {
+      int vStart = msg.indexOf('"', tIdx + 7);
+      if (vStart != -1) {
+        int vEnd = msg.indexOf('"', vStart + 1);
+        if (vEnd != -1) {
+          String type = msg.substring(vStart + 1, vEnd);
 
-      if (dir == 'F')      motorMix( 0.0f,  spdNorm);
-      else if (dir == 'B') motorMix( 0.0f, -spdNorm);
-      else if (dir == 'L') motorMix(-spdNorm, 0.0f);
-      else if (dir == 'R') motorMix( spdNorm, 0.0f);
-      else if (dir == 'S') stopCar();
+          // Ping / Heartbeat
+          if (type == "ping") {
+            broadcastWsText("{\"type\":\"pong\"}");
+            return;
+          }
+
+          // Drive Movement: {"type":"move","dir":"F","speed":180}
+          if (type == "move") {
+            int dIdx = msg.indexOf("\"dir\":");
+            char dir = 'S';
+            if (dIdx != -1) {
+              int dStart = msg.indexOf('"', dIdx + 6);
+              if (dStart != -1) {
+                dir = msg.charAt(dStart + 1);
+              }
+            }
+            int spd = CRUISE_SPEED_PWM;
+            int sIdx = msg.indexOf("\"speed\":");
+            if (sIdx != -1) {
+              int sValStart = sIdx + 8;
+              while (msg.charAt(sValStart) == ' ' || msg.charAt(sValStart) == ':') sValStart++;
+              spd = msg.substring(sValStart).toInt();
+              if (spd <= 0 || spd > 255) spd = CRUISE_SPEED_PWM;
+            }
+
+            if (manualMode && !carStopped && rotateState == ROT_IDLE) {
+              float s = (float)spd / 255.0f;
+              if      (dir == 'F') motorMix( 0.0f,  s);
+              else if (dir == 'B') motorMix( 0.0f, -s);
+              else if (dir == 'L') motorMix(-s,     0.0f);
+              else if (dir == 'R') motorMix( s,     0.0f);
+              else if (dir == 'S') stopCar();
+            }
+            return;
+          }
+
+          // Emergency Stop
+          if (type == "stop") {
+            carStopped = true;
+            stopCar();
+            broadcastWsText("{\"type\":\"stopped\",\"stopped\":true}");
+            return;
+          }
+
+          // Drive Ready / Resume
+          if (type == "start") {
+            carStopped = false;
+            if (!manualMode) autoState = AUTO_FORWARD;
+            broadcastWsText("{\"type\":\"started\",\"stopped\":false}");
+            return;
+          }
+
+          // Autonomous / Manual Mode Toggle
+          if (type == "mode") {
+            int valIdx = msg.indexOf("\"value\":");
+            if (valIdx != -1) {
+              int vS = msg.indexOf('"', valIdx + 8);
+              int vE = msg.indexOf('"', vS + 1);
+              String val = msg.substring(vS + 1, vE);
+              if (val == "auto") {
+                manualMode = false;
+                carStopped = false;
+                autoState  = AUTO_FORWARD;
+              } else {
+                manualMode = true;
+                autoState  = AUTO_STOPPED;
+                stopCar();
+              }
+              broadcastWsText("{\"type\":\"mode\",\"value\":\"" + String(manualMode ? "manual" : "auto") + "\"}");
+            }
+            return;
+          }
+
+          // Precision Gyro Rotation: {"type":"rotate","dir":"left"|"right"|"360"}
+          if (type == "rotate") {
+            int dIdx = msg.indexOf("\"dir\":");
+            if (dIdx != -1) {
+              int dS = msg.indexOf('"', dIdx + 6);
+              int dE = msg.indexOf('"', dS + 1);
+              String rDir = msg.substring(dS + 1, dE);
+              if (!carStopped && manualMode) {
+                if (rDir == "left" || rDir == "90L") {
+                  startNonBlockingRotate(90.0f, false);
+                } else if (rDir == "right" || rDir == "90R") {
+                  startNonBlockingRotate(90.0f, true);
+                } else if (rDir == "360") {
+                  startNonBlockingRotate(360.0f, true);
+                }
+              }
+            }
+            return;
+          }
+
+          // Radar Scan Trigger: {"type":"scan"}
+          if (type == "scan") {
+            if (manualMode) startRadarScan();
+            return;
+          }
+
+          // Servo Pan Head Angle: {"type":"servo","angle":90}
+          if (type == "servo") {
+            int aIdx = msg.indexOf("\"angle\":");
+            if (aIdx != -1) {
+              int aStart = aIdx + 8;
+              while (msg.charAt(aStart) == ' ' || msg.charAt(aStart) == ':') aStart++;
+              int angle = msg.substring(aStart).toInt();
+              setRadarServo(angle);
+              broadcastWsText("{\"type\":\"servo_pos\",\"angle\":" + String(radarServo.read())
+                              + ",\"distance\":" + String(readUltrasonicCM()) + "}");
+            }
+            return;
+          }
+
+          // Gyroscope Calibration: {"type":"calibrate_gyro"}
+          if (type == "calibrate_gyro") {
+            calibrateGyro();
+            broadcastWsText("{\"type\":\"gyro_calibrated\",\"success\":true,\"bias\":" + String(gyroZBias, 4) + "}");
+            return;
+          }
+        }
+      }
     }
   }
-  // --- JOYSTICK VECTOR ---
-  else if (msg.indexOf("\"type\":\"stick\"") >= 0) {
-    if (!manualMode || carStopped) return;
-    int xIdx = msg.indexOf("\"x\":");
-    int yIdx = msg.indexOf("\"y\":");
-    if (xIdx >= 0 && yIdx >= 0) {
-      float x = msg.substring(xIdx + 4).toFloat();
-      float y = msg.substring(yIdx + 4).toFloat();
-      motorMix(x, y);
-    }
+
+  // 2. Plain Text / Legacy Protocol Handlers
+  if (msg == "PING" || msg == "ping") {
+    broadcastWsText("{\"type\":\"pong\"}");
+    return;
   }
-  // --- EMERGENCY STOP ---
-  else if (msg.indexOf("\"type\":\"stop\"") >= 0) {
-    carStopped  = true;
-    autoState   = AUTO_STOPPED;
-    rotateState = ROT_IDLE;
+
+  // Joystick Stick Control: "STICK:turn,speed"
+  if (msg.startsWith("STICK:")) {
+    int comma = msg.indexOf(',', 6);
+    if (comma > 6) {
+      float turn  = msg.substring(6, comma).toFloat();
+      float speed = msg.substring(comma + 1).toFloat();
+      if (manualMode && !carStopped && rotateState == ROT_IDLE) {
+        motorMix(turn, speed);
+      }
+    }
+    return;
+  }
+
+  // Discrete Drive Commands
+  if (msg == "F" || msg == "forward")  { motorMix( 0.0f,  1.0f); return; }
+  if (msg == "B" || msg == "backward") { motorMix( 0.0f, -1.0f); return; }
+  if (msg == "L" || msg == "left")     { motorMix(-1.0f,  0.0f); return; }
+  if (msg == "R" || msg == "right")    { motorMix( 1.0f,  0.0f); return; }
+  if (msg == "S" || msg == "stop")     { stopCar(); return; }
+
+  // Emergency Stop & Resume
+  if (msg == "EMERGENCY_STOP" || msg == "STOP") {
+    carStopped = true;
     stopCar();
-    broadcastWsText("{\"type\":\"stopped\"}");
+    broadcastWsText("{\"type\":\"stopped\",\"stopped\":true}");
+    return;
   }
-  // --- RESUME / START ---
-  else if (msg.indexOf("\"type\":\"start\"") >= 0) {
+  if (msg == "RESUME" || msg == "START") {
     carStopped = false;
     if (!manualMode) autoState = AUTO_FORWARD;
-    broadcastWsText("{\"type\":\"started\"}");
+    broadcastWsText("{\"type\":\"started\",\"stopped\":false}");
+    return;
   }
-  // --- MODE SWITCH (MANUAL / AUTO) ---
-  else if (msg.indexOf("\"type\":\"mode\"") >= 0) {
-    if (msg.indexOf("\"value\":\"auto\"") >= 0) {
-      carStopped = false;
-      manualMode = false;
-      autoState  = AUTO_FORWARD;
-    } else {
-      manualMode  = true;
-      autoState   = AUTO_STOPPED;
-      rotateState = ROT_IDLE;
-      stopCar();
-    }
-    broadcastWsText("{\"type\":\"mode\",\"value\":\"" + String(manualMode ? "manual" : "auto") + "\"}");
+
+  // Gyro Rotate Commands
+  if (msg == "90L") { startNonBlockingRotate(90.0f, false); return; }
+  if (msg == "90R") { startNonBlockingRotate(90.0f, true);  return; }
+  if (msg == "360") { startNonBlockingRotate(360.0f, true); return; }
+
+  // Gyro Calibration
+  if (msg == "CAL_GYRO" || msg == "CALIBRATE") {
+    calibrateGyro();
+    broadcastWsText("{\"type\":\"gyro_calibrated\",\"success\":true,\"bias\":" + String(gyroZBias, 4) + "}");
+    return;
   }
-  // --- GYRO ROTATE ---
-  else if (msg.indexOf("\"type\":\"rotate\"") >= 0) {
-    if (!manualMode || carStopped) return;
-    if (msg.indexOf("\"dir\":\"left\"")  >= 0) startNonBlockingRotate(90.0f,  false);
-    else if (msg.indexOf("\"dir\":\"right\"") >= 0) startNonBlockingRotate(90.0f,  true);
-    else if (msg.indexOf("\"dir\":\"360\"")   >= 0) startNonBlockingRotate(360.0f, true);
+
+  // Radar Sweeper Trigger
+  if (msg == "SCAN") { startRadarScan(); return; }
+
+  // Mode Selection
+  if (msg == "MODE:MANUAL") {
+    manualMode = true;
+    autoState  = AUTO_STOPPED;
+    stopCar();
+    broadcastWsText("{\"type\":\"mode\",\"value\":\"manual\"}");
+    return;
   }
-  // --- GYRO CALIBRATION ---
-  else if (msg.indexOf("\"type\":\"calibrate_gyro\"") >= 0 || msg.indexOf("\"type\":\"zero_gyro\"") >= 0) {
-    if (mpuAvailable) {
-      calibrateGyro();
-      broadcastWsText("{\"type\":\"gyro_calibrated\",\"success\":true,\"heading\":0.0,\"pitch\":0.0,\"roll\":0.0}");
-    } else {
-      broadcastWsText("{\"type\":\"gyro_calibrated\",\"success\":false,\"error\":\"MPU6050 not detected\"}");
-    }
+  if (msg == "MODE:AUTO") {
+    manualMode = false;
+    carStopped = false;
+    autoState  = AUTO_FORWARD;
+    broadcastWsText("{\"type\":\"mode\",\"value\":\"auto\"}");
+    return;
   }
-  // --- MANUAL SERVO HEAD CONTROLS (< SCAN >) ---
-  else if (msg.indexOf("\"type\":\"servo\"") >= 0) {
-    int angIdx = msg.indexOf("\"angle\":");
-    if (angIdx >= 0) {
-      int angle = msg.substring(angIdx + 8).toInt();
-      angle = constrain(angle, 0, 180);
-      radarState = SCAN_IDLE;
-      setRadarServo(angle);
-      invalidateSonarCache();
-      long dist = readUltrasonicCM();
-      broadcastWsText("{\"type\":\"servo\",\"angle\":" + String(angle) + ",\"distance\":" + String(dist) + "}");
-    }
-  }
-  // --- RADAR SCAN SWEEP ---
-  else if (msg.indexOf("\"type\":\"scan\"") >= 0) {
-    startRadarScan();
-  }
-  // --- LED PATTERN ---
-  else if (msg.indexOf("\"type\":\"led\"") >= 0) {
-    if (msg.indexOf("\"pattern\":\"blink\"") >= 0) currentLedEffect = "blink";
-    else if (msg.indexOf("\"pattern\":\"warn\"")  >= 0) currentLedEffect = "warn";
-    else if (msg.indexOf("\"pattern\":\"pulse\"") >= 0) currentLedEffect = "pulse";
-    else currentLedEffect = "off";
-    lastLedUpdateMs = millis();
+
+  // LED Commands
+  if (msg.startsWith("LED:")) {
+    currentLedEffect = msg.substring(4);
     updateLEDs();
-  }
-  // --- PING ---
-  else if (msg.indexOf("\"type\":\"ping\"") >= 0) {
-    sendWsFrame(client, "{\"type\":\"pong\",\"time\":" + String(millis()) + "}");
+    return;
   }
 }
 
 void pollWebSocketServer() {
   if (wsServer.hasClient()) {
     WiFiClient newClient = wsServer.available();
-    int slot = -1;
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
-      if (!wsClients[i] || !wsClients[i].connected()) { slot = i; break; }
-    }
-    if (slot >= 0) {
-      wsClients[slot] = newClient;
-    } else {
-      newClient.stop();
+      if (!wsClients[i] || !wsClients[i].connected()) {
+        wsClients[i] = newClient;
+        break;
+      }
     }
   }
 
   for (int i = 0; i < MAX_WS_CLIENTS; i++) {
-    if (!wsClients[i] || !wsClients[i].connected()) continue;
-    WiFiClient& client = wsClients[i];
+    if (wsClients[i] && wsClients[i].connected() && wsClients[i].available()) {
+      WiFiClient& c = wsClients[i];
 
-    if (client.available()) {
-      String req = "";
-      unsigned long t0 = millis();
-      while (client.available() && (millis() - t0 < 50)) {
-        req += (char)client.read();
-      }
-
-      if (req.startsWith("GET ") && req.indexOf("Upgrade: websocket") >= 0) {
-        int keyIdx = req.indexOf("Sec-WebSocket-Key: ");
-        if (keyIdx >= 0) {
-          int keyEnd = req.indexOf("\r\n", keyIdx);
-          String key = req.substring(keyIdx + 19, keyEnd);
+      // Check HTTP Upgrade Handshake
+      if (c.peek() == 'G') {
+        String req = "";
+        while (c.available()) {
+          char ch = (char)c.read();
+          req += ch;
+          if (req.endsWith("\r\n\r\n")) break;
+        }
+        int kIdx = req.indexOf("Sec-WebSocket-Key: ");
+        if (kIdx != -1) {
+          int kEnd = req.indexOf("\r\n", kIdx);
+          String key = req.substring(kIdx + 19, kEnd);
           key.trim();
           String accept = computeWsAccept(key);
-          client.print("HTTP/1.1 101 Switching Protocols\r\n"
-                       "Upgrade: websocket\r\n"
-                       "Connection: Upgrade\r\n"
-                       "Sec-WebSocket-Accept: " + accept + "\r\n\r\n");
+          c.print("HTTP/1.1 101 Switching Protocols\r\n"
+                  "Upgrade: websocket\r\n"
+                  "Connection: Upgrade\r\n"
+                  "Sec-WebSocket-Accept: " + accept + "\r\n\r\n");
         }
-      } else if (req.length() >= 2) {
-        uint8_t b0 = (uint8_t)req[0];
-        uint8_t b1 = (uint8_t)req[1];
+        continue;
+      }
+
+      // Read WebSocket Frame
+      uint8_t b0 = c.read();
+      uint8_t b1 = c.read();
+      bool masked = (b1 & 0x80) != 0;
+      size_t len  = b1 & 0x7F;
+      if (len == 126) {
+        len = ((size_t)c.read() << 8) | c.read();
+      }
+
+      uint8_t mask[4] = {0,0,0,0};
+      if (masked) {
+        c.readBytes(mask, 4);
+      }
+
+      if (len <= WS_MAX_PAYLOAD) {
+        String payload = "";
+        for (size_t k = 0; k < len; k++) {
+          uint8_t b = c.read();
+          if (masked) b ^= mask[k % 4];
+          payload += (char)b;
+        }
         uint8_t opcode = b0 & 0x0F;
-        bool masked = (b1 & 0x80) != 0;
-        size_t payloadLen = b1 & 0x7F;
-
-        size_t pos = 2;
-        if (payloadLen == 126 && req.length() >= 4) {
-          payloadLen = ((uint8_t)req[2] << 8) | (uint8_t)req[3];
-          pos = 4;
-        }
-
-        if (masked && req.length() >= pos + 4 + payloadLen) {
-          uint8_t mask[4];
-          for (int m = 0; m < 4; m++) mask[m] = (uint8_t)req[pos++];
-          String decoded = "";
-          decoded.reserve(payloadLen);
-          for (size_t p = 0; p < payloadLen; p++) {
-            decoded += (char)((uint8_t)req[pos++] ^ mask[p % 4]);
-          }
-          if (opcode == 0x01) { // Text
-            handleWsMessage(client, decoded);
-          } else if (opcode == 0x09) { // Ping
-            client.write(0x8A);
-            client.write((uint8_t)0);
-          }
+        if (opcode == 0x01) {
+          handleWsMessage(c, payload);
+        } else if (opcode == 0x08) {
+          c.stop();
         }
       }
     }
@@ -906,332 +1832,83 @@ void pollWebSocketServer() {
 }
 
 // ===================================================================================
-// 8. WI-FI STA NETWORK MANAGER & PROFILES
+// 11. REST API & NVS PREFERENCES
 // ===================================================================================
-String getWifiProfilesJson() {
-  String   json  = "{\"selected\":" + String(activeWifiIndex) + ",\"networks\":[";
-  uint8_t  count = nvsPrefs.getUChar("cnt", 0);
-  bool     first = true;
-  for (uint8_t i = 0; i < count && i < MAX_WIFI_PROFILES; i++) {
-    String s = nvsPrefs.getString((String("s") + i).c_str(), "");
-    if (s.length() == 0) continue;
-    if (!first) json += ",";
-    first = false;
-    json += "{\"ssid\":\"" + s + "\"}";
+void loadSavedNetworks() {
+  nvsPrefs.begin("novax_wifi", true);
+  selectedNetIdx = nvsPrefs.getInt("sel", 0);
+  for (int i = 0; i < MAX_SAVED_NETS; i++) {
+    String sKey = "s" + String(i);
+    String pKey = "p" + String(i);
+    String vKey = "v" + String(i);
+    String ssid = nvsPrefs.getString(sKey.c_str(), "");
+    String pass = nvsPrefs.getString(pKey.c_str(), "");
+    savedNets[i].valid = nvsPrefs.getUChar(vKey.c_str(), 0);
+    strncpy(savedNets[i].ssid, ssid.c_str(), 32);
+    savedNets[i].ssid[32] = '\0';
+    strncpy(savedNets[i].pass, pass.c_str(), 64);
+    savedNets[i].pass[64] = '\0';
   }
-  json += "]}";
-  return json;
+  nvsPrefs.end();
 }
 
-void setCorsHeaders() {
+void saveSavedNetworks() {
+  nvsPrefs.begin("novax_wifi", false);
+  nvsPrefs.putInt("sel", selectedNetIdx);
+  for (int i = 0; i < MAX_SAVED_NETS; i++) {
+    String sKey = "s" + String(i);
+    String pKey = "p" + String(i);
+    String vKey = "v" + String(i);
+    nvsPrefs.putString(sKey.c_str(), savedNets[i].ssid);
+    nvsPrefs.putString(pKey.c_str(), savedNets[i].pass);
+    nvsPrefs.putUChar(vKey.c_str(), savedNets[i].valid);
+  }
+  nvsPrefs.end();
+}
+
+static void setCorsHeaders() {
   restServer.sendHeader("Access-Control-Allow-Origin", "*");
   restServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   restServer.sendHeader("Access-Control-Allow-Headers", "*");
 }
 
-void handleWifiScan() {
-  setCorsHeaders();
-  if (!wifiScanPending) {
-    WiFi.scanNetworks(true, true); // Async scan, include hidden networks
-    wifiScanPending   = true;
-    wifiScanStartedMs = millis();
-    restServer.send(202, "application/json", "{\"status\":\"scanning\"}");
-    return;
-  }
-  int count = WiFi.scanComplete();
-  if (count == WIFI_SCAN_RUNNING) {
-    if (millis() - wifiScanStartedMs > 8000) {
-      wifiScanPending = false;
-      WiFi.scanDelete();
-      restServer.send(504, "application/json", "{\"error\":\"scan_timeout\"}");
-      return;
-    }
-    restServer.send(202, "application/json", "{\"status\":\"scanning\"}");
-    return;
-  }
-  wifiScanPending = false;
-  String out = "{\"networks\":[";
-  if (count > 0) {
-    for (int i = 0; i < count; i++) {
-      if (i) out += ",";
-      String ssid = WiFi.SSID(i);
-      ssid.replace("\"", "\\\"");
-      out += "{\"ssid\":\"" + ssid + "\",\"rssi\":" + String(WiFi.RSSI(i))
-           + ",\"secure\":" + String(WiFi.encryptionType(i) != WIFI_AUTH_OPEN ? 1 : 0) + "}";
-    }
-  }
-  out += "]}";
-  WiFi.scanDelete();
-  restServer.send(200, "application/json", out);
-}
-
-void handleWifiSaved() {
-  setCorsHeaders();
-  restServer.send(200, "application/json", getWifiProfilesJson());
-}
-
-void handleWifiSave() {
-  setCorsHeaders();
-  if (!restServer.hasArg("ssid") || !restServer.hasArg("password")) {
-    restServer.send(400, "text/plain", "Missing ssid or password");
-    return;
-  }
-  String  ssid  = restServer.arg("ssid");
-  String  pass  = restServer.arg("password");
-  uint8_t count = nvsPrefs.getUChar("cnt", 0);
-  int     foundSlot = -1;
-
-  for (uint8_t i = 0; i < count; i++) {
-    if (nvsPrefs.getString((String("s") + i).c_str(), "") == ssid) { foundSlot = i; break; }
-  }
-  if (foundSlot < 0) {
-    if (count >= MAX_WIFI_PROFILES) { restServer.send(409, "text/plain", "Saved profiles limit reached"); return; }
-    foundSlot = count++;
-  }
-  nvsPrefs.putString((String("s") + foundSlot).c_str(), ssid);
-  nvsPrefs.putString((String("p") + foundSlot).c_str(), pass);
-  nvsPrefs.putUChar("cnt", count);
-  if (activeWifiIndex < 0) { activeWifiIndex = foundSlot; nvsPrefs.putInt("sel", activeWifiIndex); }
-  restServer.send(200, "application/json", getWifiProfilesJson());
-}
-
-void handleWifiSelect() {
-  setCorsHeaders();
-  if (!restServer.hasArg("index")) { restServer.send(400, "text/plain", "Missing index"); return; }
-  int idx = restServer.arg("index").toInt();
-  uint8_t count = nvsPrefs.getUChar("cnt", 0);
-  if (idx < 0 || idx >= count) { restServer.send(400, "text/plain", "Invalid index"); return; }
-  activeWifiIndex = idx;
-  nvsPrefs.putInt("sel", idx);
-  restServer.send(200, "application/json", getWifiProfilesJson());
-}
-
-void handleWifiDelete() {
-  setCorsHeaders();
-  if (!restServer.hasArg("index")) { restServer.send(400, "text/plain", "Missing index"); return; }
-  int     idx   = restServer.arg("index").toInt();
-  uint8_t count = nvsPrefs.getUChar("cnt", 0);
-  if (idx < 0 || idx >= count) { restServer.send(400, "text/plain", "Invalid index"); return; }
-  for (int i = idx; i < count - 1; i++) {
-    nvsPrefs.putString((String("s") + i).c_str(), nvsPrefs.getString((String("s") + (i + 1)).c_str(), ""));
-    nvsPrefs.putString((String("p") + i).c_str(), nvsPrefs.getString((String("p") + (i + 1)).c_str(), ""));
-  }
-  nvsPrefs.remove((String("s") + (count - 1)).c_str());
-  nvsPrefs.remove((String("p") + (count - 1)).c_str());
-  count--;
-  nvsPrefs.putUChar("cnt", count);
-  if (activeWifiIndex >= count) activeWifiIndex = (count > 0) ? 0 : -1;
-  nvsPrefs.putInt("sel", activeWifiIndex);
-  restServer.send(200, "application/json", getWifiProfilesJson());
-}
-
-void handleSwitchSTA() {
-  setCorsHeaders();
-  uint8_t count = nvsPrefs.getUChar("cnt", 0);
-  if (count == 0 || activeWifiIndex < 0 || activeWifiIndex >= count) {
-    restServer.send(400, "text/plain", "No selected saved network");
-    return;
-  }
-  pendingStaSsid    = nvsPrefs.getString((String("s") + activeWifiIndex).c_str(), "");
-  pendingStaPass    = nvsPrefs.getString((String("p") + activeWifiIndex).c_str(), "");
-  pendingStaConnect = true;
-  pendingStaDelay   = millis() + 200; // Allow HTTP response to flush
-  restServer.send(200, "application/json",
-    "{\"status\":\"connecting\",\"ssid\":\"" + pendingStaSsid
-    + "\",\"host\":\"http://novax.local\"}");
-}
-
-void handleSwitchAP() {
-  setCorsHeaders();
-  restServer.send(200, "application/json", "{\"status\":\"switched\",\"mode\":\"AP\",\"ip\":\"192.168.4.1\"}");
-  delay(120);
-  pendingStaConnect = false;
-  WiFi.disconnect(true, true);
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(AP_DEFAULT_SSID, AP_DEFAULT_PASS);
-  Serial.printf("[WIFI] Switched to AP mode. IP: %s\n", WiFi.softAPIP().toString().c_str());
-}
-
-void processPendingStaConnect() {
-  if (!pendingStaConnect || millis() < pendingStaDelay) return;
-  pendingStaConnect = false;
-
-  Serial.printf("[WIFI] Connecting to Station SSID: %s\n", pendingStaSsid.c_str());
-  WiFi.begin(pendingStaSsid.c_str(), pendingStaPass.c_str());
-
-  unsigned long t = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t < 10000) delay(100);
-
-  if (WiFi.status() == WL_CONNECTED) {
-    MDNS.end();
-    MDNS.begin("novax");
-    Serial.printf("[WIFI] STA connected! IP: %s\n", WiFi.localIP().toString().c_str());
-    broadcastWsText("{\"type\":\"wifi\",\"mode\":\"STA\",\"ip\":\"" + WiFi.localIP().toString() + "\"}");
-  } else {
-    Serial.println("[WIFI] STA connect timed out — maintaining AP.");
-    broadcastWsText("{\"type\":\"wifi\",\"mode\":\"AP\",\"ip\":\"192.168.4.1\",\"error\":\"sta_failed\"}");
-  }
-}
-
-// ===================================================================================
-// 9. REST API & OTA HANDLERS
-// ===================================================================================
-bool isOtaAuthorized() {
-  if (!restServer.hasHeader("X-NovaX-OTA")) return true; // Open in local AP mode
-  return (restServer.header("X-NovaX-OTA") == OTA_DEFAULT_TOKEN);
-}
-
-void handleStatus() {
-  setCorsHeaders();
-  long   d       = readUltrasonicCM();
-  String wifiMode = (WiFi.getMode() == WIFI_AP ? "AP" : (WiFi.status() == WL_CONNECTED ? "STA" : "AP_STA"));
-  String ip      = (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString());
-  String s = "{";
-  s += "\"distance\":"   + String(d)    + ",";
-  s += "\"mode\":\""     + String(manualMode ? "manual" : "auto") + "\",";
-  s += "\"manual\":"     + String(manualMode ? 1 : 0) + ",";
-  s += "\"stopped\":"    + String((carStopped || autoState == AUTO_STOPPED) ? 1 : 0) + ",";
-  s += "\"yaw\":"        + String(yawHeading, 1) + ",";
-  s += "\"heading\":"    + String(yawHeading, 1) + ",";
-  s += "\"pitch\":"      + String(pitchAngle, 1) + ",";
-  s += "\"roll\":"       + String(rollAngle, 1)  + ",";
-  s += "\"imu\":\""      + String(mpuAvailable ? "MPU6050" : "None") + "\",";
-  s += "\"camera\":0,";
-  s += "\"wifiMode\":\"" + wifiMode + "\",";
-  s += "\"ip\":\""       + ip + "\",";
-  s += "\"version\":\""  + String(FIRMWARE_VERSION) + "\"";
-  s += "}";
-  restServer.send(200, "application/json", s);
-}
-
-void handleFirmwareInfo() {
-  setCorsHeaders();
-  String out = "{";
-  out += "\"name\":\"NovaX V2\",";
-  out += "\"version\":\"" + String(FIRMWARE_VERSION) + "\",";
-  out += "\"hardware\":\"" + String(HARDWARE_VERSION) + "\",";
-  out += "\"buildDate\":\"" + String(BUILD_DATE) + "\",";
-  out += "\"camera\":\"None\",";
-  out += "\"imu\":\"" + String(mpuAvailable ? "MPU6050" : "None") + "\",";
-  out += "\"status\":\"online\"";
-  out += "}";
-  restServer.send(200, "application/json", out);
-}
-
-// Embedded Web Flasher
-static const char INDEX_HTML[] PROGMEM = R"rawliteral(
+// Embedded Web Flasher Page
+const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NovaX V2 Control & OTA</title>
+  <meta charset="utf-8">
+  <title>NovaX V3 (ESP32-WROOM)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    :root {
-      --bg: #0b0f19;
-      --card: #131b2e;
-      --border: #1f2d4a;
-      --cyan: #06b6d4;
-      --green: #10b981;
-      --text: #f1f5f9;
-      --subtext: #94a3b8;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    body { background: var(--bg); color: var(--text); display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 1rem; }
-    .card { background: var(--card); border: 1px solid var(--border); border-radius: 1rem; max-width: 480px; width: 100%; padding: 2rem; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
-    .badge { display: inline-block; padding: 0.25rem 0.75rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; background: rgba(6, 182, 212, 0.15); color: var(--cyan); border: 1px solid var(--cyan); margin-bottom: 0.75rem; }
-    h1 { font-size: 1.5rem; font-weight: 800; margin-bottom: 0.5rem; }
-    p { font-size: 0.875rem; color: var(--subtext); line-height: 1.5; margin-bottom: 1.5rem; }
-    .dropzone { border: 2px dashed var(--border); border-radius: 0.75rem; padding: 1.5rem; text-align: center; margin-bottom: 1.5rem; cursor: pointer; }
-    .dropzone:hover { border-color: var(--cyan); }
-    input[type="file"] { display: none; }
-    .file-label { font-size: 0.875rem; color: var(--cyan); font-weight: 600; }
-    .filename { font-size: 0.8rem; color: var(--text); margin-top: 0.5rem; }
-    button { width: 100%; padding: 0.875rem; background: linear-gradient(135deg, #06b6d4, #0284c7); color: #fff; border: none; border-radius: 0.75rem; font-size: 0.95rem; font-weight: 700; cursor: pointer; }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    .progress-box { margin-top: 1.5rem; display: none; }
-    .progress-bar-bg { background: rgba(255, 255, 255, 0.1); border-radius: 9999px; height: 10px; overflow: hidden; margin-bottom: 0.5rem; }
-    .progress-fill { background: linear-gradient(90deg, #06b6d4, #10b981); width: 0%; height: 100%; }
-    .status-text { font-size: 0.8rem; color: var(--subtext); text-align: center; }
-    .alert { padding: 1rem; border-radius: 0.75rem; font-size: 0.875rem; margin-top: 1rem; display: none; }
-    .alert.success { background: rgba(16, 185, 129, 0.15); border: 1px solid var(--green); color: #6ee7b7; display: block; }
-    .nav-links { display: flex; gap: 0.5rem; margin-top: 1.5rem; justify-content: center; }
-    .nav-btn { color: var(--cyan); font-size: 0.8rem; text-decoration: none; border: 1px solid var(--border); padding: 0.4rem 0.8rem; border-radius: 0.5rem; }
+    body { font-family: sans-serif; background: #0b0f19; color: #f0f4fc; text-align: center; padding: 20px; }
+    .card { background: #131b2e; border: 1px solid #1f2c4c; border-radius: 12px; max-width: 480px; margin: 0 auto; padding: 20px; }
+    h2 { color: #38bdf8; margin: 0 0 6px 0; }
+    .sub { color: #94a3b8; font-size: 13px; margin: 0 0 12px 0; }
+    .cam-box { width: 100%; max-width: 320px; aspect-ratio: 160/120; background: #02070d; border-radius: 8px; margin: 10px auto; overflow: hidden; border: 1px solid #38bdf8; display: flex; align-items: center; justify-content: center; }
+    .cam-img { width: 100%; height: 100%; object-fit: contain; }
+    .btn { background: #2563eb; color: #fff; border: 0; padding: 9px 18px; border-radius: 8px; font-weight: bold; cursor: pointer; margin: 4px; }
+    .btn-green { background: #059669; }
   </style>
 </head>
 <body>
   <div class="card">
-    <span class="badge">NovaX V2 • Pure Car Edition</span>
-    <h1>Wireless OTA Flasher</h1>
-    <p>Upload a new <b>NovaX-Firmware.bin</b> over Wi-Fi without needing a USB cable.</p>
-
-    <div class="dropzone" onclick="document.getElementById('fwInput').click()">
-      <div style="font-size: 2rem; margin-bottom: 0.5rem;">⚡</div>
-      <div class="file-label">Choose Firmware Binary (.bin)</div>
-      <div class="filename" id="fileChosen">No file chosen</div>
-      <input type="file" id="fwInput" accept=".bin">
+    <h2>NovaX V3 Cockpit</h2>
+    <p class="sub">OV7670 160x120 JPEG | MPU6050 Gyro | MX1508 Motors</p>
+    <div class="cam-box">
+      <img id="liveCam" src="/cam.jpg" alt="Live Camera" class="cam-img">
     </div>
-
-    <button id="flashBtn" disabled onclick="uploadFirmware()">Flash Firmware Now</button>
-
-    <div class="progress-box" id="progressBox">
-      <div class="progress-bar-bg">
-        <div class="progress-fill" id="progressFill"></div>
-      </div>
-      <div class="status-text" id="statusText">0% Uploaded</div>
-    </div>
-
-    <div class="alert" id="alertBox"></div>
-
-    <div class="nav-links">
-      <a href="/status" class="nav-btn" target="_blank">📊 Status JSON</a>
-      <a href="/calibrate_gyro" class="nav-btn" target="_blank">⚖️ Calibrate Gyro</a>
-      <a href="/firmware" class="nav-btn" target="_blank">ℹ️ Firmware</a>
+    <div>
+      <button class="btn btn-green" onclick="refreshCam()">Snapshot</button>
+      <a href="/status"><button class="btn">Status JSON</button></a>
     </div>
   </div>
-
   <script>
-    const fwInput = document.getElementById('fwInput');
-    const fileChosen = document.getElementById('fileChosen');
-    const flashBtn = document.getElementById('flashBtn');
-    const progressBox = document.getElementById('progressBox');
-    const progressFill = document.getElementById('progressFill');
-    const statusText = document.getElementById('statusText');
-    const alertBox = document.getElementById('alertBox');
-
-    fwInput.onchange = () => {
-      if (fwInput.files.length > 0) {
-        fileChosen.textContent = fwInput.files[0].name;
-        flashBtn.disabled = false;
-      }
-    };
-
-    function uploadFirmware() {
-      if (!fwInput.files.length) return;
-      flashBtn.disabled = true;
-      progressBox.style.display = 'block';
-
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', '/update', true);
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          const percent = Math.round((e.loaded / e.total) * 100);
-          progressFill.style.width = percent + '%';
-          statusText.textContent = `Uploading: ${percent}%`;
-        }
-      };
-      xhr.onload = () => {
-        if (xhr.status === 200) {
-          progressFill.style.width = '100%';
-          statusText.textContent = 'Complete! Rebooting...';
-          alertBox.className = 'alert success';
-          alertBox.innerHTML = '<b>Flash Success!</b> Reconnecting in 10s.';
-        }
-      };
-      const fd = new FormData();
-      fd.append('firmware', fwInput.files[0]);
-      xhr.send(fd);
+    let active = true;
+    function refreshCam() {
+      document.getElementById('liveCam').src = '/cam.jpg?t=' + Date.now();
     }
+    setInterval(refreshCam, 200);
   </script>
 </body>
 </html>
@@ -1240,188 +1917,349 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 void handleOtaUpload() {
   HTTPUpload& upload = restServer.upload();
   if (upload.status == UPLOAD_FILE_START) {
-    otaAuthorised = isOtaAuthorized();
-    if (!otaAuthorised) return;
     stopCar();
     carStopped = true;
-    if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) Update.printError(Serial);
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      DEBUG_PRINTLN("[OTA] Update.begin failed!");
+    }
   } else if (upload.status == UPLOAD_FILE_WRITE) {
-    if (otaAuthorised && Update.isRunning()) Update.write(upload.buf, upload.currentSize);
+    if (Update.isRunning()) {
+      Update.write(upload.buf, upload.currentSize);
+    }
   } else if (upload.status == UPLOAD_FILE_END) {
-    if (otaAuthorised && Update.end(true)) Serial.println("[OTA] Success!");
-  } else if (upload.status == UPLOAD_FILE_ABORTED) {
-    Update.abort();
+    if (Update.end(true)) {
+      DEBUG_PRINTLN("[OTA] Success! Restarting...");
+    }
   }
 }
 
 void handleOtaFinish() {
   setCorsHeaders();
-  if (Update.hasError()) { restServer.send(500, "text/plain", "Flash Failed"); return; }
-  restServer.send(200, "application/json", "{\"status\":\"ok\",\"restarting\":true}");
-  delay(500);
-  ESP.restart();
+  if (Update.hasError()) {
+    restServer.send(500, "text/plain", "Flash Failed");
+  } else {
+    restServer.send(200, "application/json", "{\"status\":\"ok\",\"restarting\":true}");
+    delay(500);
+    ESP.restart();
+  }
 }
 
 // ===================================================================================
-// 10. SETUP & ROUTES
+// 12. SETUP & SERVICES INITIALIZATION
 // ===================================================================================
 void setup() {
-  // Disable aggressive brownout detector to prevent motor inrush resets
-  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
-
+#if SERIAL_ENABLED
   Serial.begin(115200);
-  delay(200);
-  Serial.println("\n[NovaX V2 - Pure Car Edition] Initializing...");
+  delay(300);
+  Serial.println("\n========================================");
+  Serial.println("NovaX V3 ESP32");
+  Serial.println("========================================");
+#endif
 
-  // Initialize ESP32PWM timers for ESP32Servo before analogWrite claims them
-  ESP32PWM::allocateTimer(0);
-  ESP32PWM::allocateTimer(1);
-  ESP32PWM::allocateTimer(2);
-  ESP32PWM::allocateTimer(3);
-  radarServo.setPeriodHertz(50);
-  radarServo.attach(SERVO_PIN, 500, 2400);
-  radarServo.write(90); // Physical center
-  Serial.printf("[SERVO] Initialized and attached to GPIO %d (Centered to 90 deg)\n", SERVO_PIN);
-
+  // 2. Motor pins OFF
   initPins();
+  stopCar();
+
+  // 3. LED pins OFF
+  write595(0x00);
+
+  // 4. I2C Bus Recovery: toggle SCL 16 times to free any stuck slave on GPIO 21/22
+  pinMode(NVX_CAM_SIOC, OUTPUT);
+  pinMode(NVX_CAM_SIOD, INPUT_PULLUP);
+  for (int i = 0; i < 16; i++) {
+    digitalWrite(NVX_CAM_SIOC, HIGH);
+    delayMicroseconds(5);
+    digitalWrite(NVX_CAM_SIOC, LOW);
+    delayMicroseconds(5);
+  }
+  digitalWrite(NVX_CAM_SIOC, HIGH);
+  delayMicroseconds(5);
+
+  // 5. Shared I2C Bus on GPIO 21 (SDA) and GPIO 22 (SCL) at 100 kHz
+  Wire.begin(NVX_CAM_SIOD, NVX_CAM_SIOC, 100000);
+  Wire.setClock(100000);
+  Wire.setTimeOut(25);
+
+  // 6. Run I2C scanner to discover both camera (0x21) and IMU (0x68/0x69)
+  scanI2CBus();
+
+  // 7. Initialize MPU6050 FIRST (clean I2C state before camera register writes)
   initMPU();
 
-  nvsPrefs.begin("wifi", false);
-  activeWifiIndex = nvsPrefs.getInt("sel", -1);
+  // 8. Initialize OV7670 Camera (160x120 QQVGA, Direct JPEG Stream)
+  s_jpegInput = (uint8_t*)heap_caps_malloc(NVX_FRAME_BYTES, MALLOC_CAP_8BIT);
+  Serial.println("\n[OV7670] Initializing...");
+  if (s_jpegInput && nvxCameraBegin()) {
+    cameraAvailable = true;
+    Serial.println("[OV7670] READY");
+    Serial.println("[CAM] 160x120 JPEG Q90");
+  } else {
+    cameraAvailable = false;
+    Serial.println("[OV7670] FAILED to initialize");
+  }
 
-  // Use AP_STA mode so the car AP remains accessible while scanning or connecting to home Wi-Fi
+  // 10. Initialize SG90 Radar Servo
+  radarServo.setPeriodHertz(50);
+  radarServo.attach(SERVO_PIN, 544, 2400);
+  radarServo.write(90);
+
+  // 11. Wi-Fi Setup: AP + STA (Resilient AP always remains alive)
+  loadSavedNetworks();
   WiFi.mode(WIFI_AP_STA);
-  WiFi.setHostname("novax");
+  WiFi.setSleep(false);
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);
   WiFi.softAP(AP_DEFAULT_SSID, AP_DEFAULT_PASS);
+
+  if (savedNets[selectedNetIdx].valid && strlen(savedNets[selectedNetIdx].ssid) > 0) {
+    DEBUG_PRINTF("[WIFI] Connecting to saved STA: %s\n", savedNets[selectedNetIdx].ssid);
+    WiFi.begin(savedNets[selectedNetIdx].ssid, savedNets[selectedNetIdx].pass);
+  } else {
+    // Default backup network
+    WiFi.begin("Airtel_Ruby", "Rubyblack@567");
+  }
+
   MDNS.begin("novax");
 
-  Serial.printf("[WIFI] AP Mode Ready | SSID: %s | IP: %s\n",
-                AP_DEFAULT_SSID, WiFi.softAPIP().toString().c_str());
-
-  // Web Flasher & Status Routes
+  // 12. REST Server Routes
   restServer.on("/", HTTP_GET, []() {
     setCorsHeaders();
     restServer.send_P(200, "text/html", INDEX_HTML);
   });
-  restServer.on("/update", HTTP_GET, []() {
-    setCorsHeaders();
-    restServer.send_P(200, "text/html", INDEX_HTML);
-  });
-  restServer.on("/firmware",   HTTP_GET,  handleFirmwareInfo);
-  restServer.on("/status",     HTTP_GET,  handleStatus);
-  restServer.on("/ota/status", HTTP_GET,  handleFirmwareInfo);
-  restServer.on("/ota/update", HTTP_POST, handleOtaFinish, handleOtaUpload);
-  restServer.on("/update",     HTTP_POST, handleOtaFinish, handleOtaUpload);
 
-  // Wi-Fi Network Management Endpoints (Used by Cockpit Network Manager)
-  restServer.on("/wifi/scan",      HTTP_GET,  handleWifiScan);
-  restServer.on("/wifi/saved",     HTTP_GET,  handleWifiSaved);
-  restServer.on("/wifi/save",      HTTP_POST, handleWifiSave);
-  restServer.on("/wifi/save",      HTTP_GET,  handleWifiSave);
-  restServer.on("/wifi/select",    HTTP_POST, handleWifiSelect);
-  restServer.on("/wifi/select",    HTTP_GET,  handleWifiSelect);
-  restServer.on("/wifi/delete",    HTTP_POST, handleWifiDelete);
-  restServer.on("/wifi/delete",    HTTP_GET,  handleWifiDelete);
-  restServer.on("/wifi/switchSta", HTTP_POST, handleSwitchSTA);
-  restServer.on("/wifi/switchSta", HTTP_GET,  handleSwitchSTA);
-  restServer.on("/wifi/switchAp",  HTTP_POST, handleSwitchAP);
-  restServer.on("/wifi/switchAp",  HTTP_GET,  handleSwitchAP);
-
-  // Gyro Calibration (REST)
-  restServer.on("/calibrate_gyro", HTTP_POST, []() {
+  restServer.on("/cam.jpg", HTTP_GET, []() {
     setCorsHeaders();
-    if (mpuAvailable) {
-      calibrateGyro();
-      restServer.send(200, "application/json", "{\"status\":\"ok\",\"calibrated\":true,\"heading\":0.0,\"pitch\":0.0,\"roll\":0.0}");
+    if (!cameraAvailable || !s_jpegInput) {
+      restServer.send(503, "text/plain", "Camera not available");
+      return;
+    }
+    const size_t LINE_BYTES = (size_t)NVX_FRAME_W * NVX_FRAME_BPP;
+    for (uint16_t y = 0; y < NVX_FRAME_H; ++y) {
+      uint16_t* line = camera_getLine(y + 1);
+      if (!line) {
+        restServer.send(500, "text/plain", "Frame capture error");
+        return;
+      }
+      memcpy(s_jpegInput + (size_t)y * LINE_BYTES, line, LINE_BYTES);
+    }
+    for (size_t i = 0; i < NVX_FRAME_BYTES; i += 2) {
+      const uint8_t t = s_jpegInput[i];
+      s_jpegInput[i]   = s_jpegInput[i + 1];
+      s_jpegInput[i + 1] = t;
+    }
+    uint8_t* outJpg = nullptr;
+    size_t outJpgLen = 0;
+    if (fmt2jpg(s_jpegInput, NVX_FRAME_BYTES, NVX_FRAME_W, NVX_FRAME_H, PIXFORMAT_RGB565, JPEG_QUALITY, &outJpg, &outJpgLen) && outJpg) {
+      restServer.sendHeader("Access-Control-Allow-Origin", "*");
+      restServer.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+      restServer.send_P(200, "image/jpeg", (const char*)outJpg, outJpgLen);
+      free(outJpg);
     } else {
-      restServer.send(503, "application/json", "{\"status\":\"error\",\"message\":\"MPU6050 not detected\"}");
-    }
-  });
-  restServer.on("/calibrate_gyro", HTTP_GET, []() {
-    setCorsHeaders();
-    if (mpuAvailable) {
-      calibrateGyro();
-      restServer.send(200, "application/json", "{\"status\":\"ok\",\"calibrated\":true,\"heading\":0.0,\"pitch\":0.0,\"roll\":0.0}");
-    } else {
-      restServer.send(503, "application/json", "{\"status\":\"error\",\"message\":\"MPU6050 not detected\"}");
+      restServer.send(500, "text/plain", "JPEG encode error");
     }
   });
 
-  // Servo Head Control (REST)
-  restServer.on("/servo", HTTP_GET, []() {
+  restServer.on("/status", HTTP_GET, []() {
     setCorsHeaders();
-    if (!restServer.hasArg("angle")) { restServer.send(400, "text/plain", "Missing angle"); return; }
-    int angle = constrain(restServer.arg("angle").toInt(), 0, 180);
-    radarState = SCAN_IDLE;
-    setRadarServo(angle);
-    invalidateSonarCache();
-    long dist = readUltrasonicCM();
-    restServer.send(200, "application/json",
-      "{\"status\":\"ok\",\"angle\":" + String(angle) + ",\"distance\":" + String(dist) + "}");
+    long d = readUltrasonicCM();
+    String json = "{";
+    json += "\"firmware\":\""  + String(FIRMWARE_VERSION)  + "\",";
+    json += "\"version\":\""   + String(FIRMWARE_VERSION)  + "\",";
+    json += "\"camera\":"      + String(cameraAvailable ? "true" : "false") + ",";
+    json += "\"gyro\":"        + String(mpuAvailable ? "true" : "false") + ",";
+    json += "\"heading\":"     + String(yawHeading, 1)     + ",";
+    json += "\"yaw\":"         + String(yawHeading, 1)     + ",";
+    json += "\"pitch\":"       + String(pitchAngle, 1)     + ",";
+    json += "\"roll\":"        + String(rollAngle, 1)      + ",";
+    json += "\"distance\":"    + String(d)                 + ",";
+    json += "\"mode\":\""      + String(manualMode ? "manual" : "auto") + "\",";
+    json += "\"stopped\":"     + String(carStopped ? "true" : "false")  + ",";
+    json += "\"battery\":4.15,";
+    json += "\"wifiMode\":\""  + String(WiFi.getMode() == WIFI_MODE_APSTA ? "AP+STA" : "AP") + "\",";
+    json += "\"ip\":\""        + WiFi.softAPIP().toString() + "\",";
+    json += "\"freeHeap\":"    + String(ESP.getFreeHeap());
+    json += "}";
+    restServer.send(200, "application/json", json);
   });
 
-  // Radar Sweeper Trigger & Results (REST)
-  restServer.on("/scan", HTTP_GET, []() {
-    setCorsHeaders();
-    startRadarScan();
-    restServer.send(200, "application/json", "{\"status\":\"scanning\"}");
-  });
-  restServer.on("/scan", HTTP_POST, []() {
-    setCorsHeaders();
-    startRadarScan();
-    restServer.send(200, "application/json", "{\"status\":\"scanning\"}");
-  });
-  restServer.on("/scanResult", HTTP_GET, []() {
-    setCorsHeaders();
-    String res = "{\"status\":\""
-      + String(radarState == SCAN_DONE ? "done" : radarState == SCAN_RUNNING ? "scanning" : "idle") + "\"";
-    res += ",\"left\":"  + String(scanDistLeft);
-    res += ",\"front\":" + String(scanDistFront);
-    res += ",\"right\":" + String(scanDistRight);
-    res += "}";
-    restServer.send(200, "application/json", res);
-  });
-
-  // Basic Driving Control (REST)
-  restServer.on("/stop", HTTP_POST, []() {
-    setCorsHeaders();
-    carStopped = true;
-    stopCar();
-    restServer.send(200, "application/json", "{\"status\":\"stopped\"}");
-  });
-  restServer.on("/start", HTTP_POST, []() {
-    setCorsHeaders();
-    carStopped = false;
-    if (!manualMode) autoState = AUTO_FORWARD;
-    restServer.send(200, "application/json", "{\"status\":\"started\"}");
-  });
-  restServer.on("/mode", HTTP_GET, []() {
-    setCorsHeaders();
-    if (restServer.hasArg("val")) {
-      manualMode = (restServer.arg("val") != "auto");
-      autoState  = manualMode ? AUTO_STOPPED : AUTO_FORWARD;
-    } else if (restServer.hasArg("set")) {
-      manualMode = (restServer.arg("set") != "auto");
-      autoState  = manualMode ? AUTO_STOPPED : AUTO_FORWARD;
-    }
-    restServer.send(200, "application/json", "{\"mode\":\"" + String(manualMode ? "manual" : "auto") + "\"}");
-  });
   restServer.on("/move", HTTP_GET, []() {
     setCorsHeaders();
     if (!manualMode || carStopped) { restServer.send(200, "application/json", "{\"status\":\"blocked\"}"); return; }
     if (!restServer.hasArg("d")) { restServer.send(400, "text/plain", "Missing d"); return; }
     char dir = restServer.arg("d").charAt(0);
-    int  spd = restServer.hasArg("speed") ? restServer.arg("speed").toInt() : CRUISE_SPEED_PWM;
-    float spdNorm = (float)spd / 255.0f;
-    if      (dir == 'F') motorMix( 0.0f,  spdNorm);
-    else if (dir == 'B') motorMix( 0.0f, -spdNorm);
-    else if (dir == 'L') motorMix(-spdNorm, 0.0f);
-    else if (dir == 'R') motorMix( spdNorm, 0.0f);
+    int spd = restServer.hasArg("speed") ? restServer.arg("speed").toInt() : CRUISE_SPEED_PWM;
+    float s = (float)spd / 255.0f;
+    if      (dir == 'F') motorMix( 0.0f,  s);
+    else if (dir == 'B') motorMix( 0.0f, -s);
+    else if (dir == 'L') motorMix(-s,     0.0f);
+    else if (dir == 'R') motorMix( s,     0.0f);
     else if (dir == 'S') stopCar();
     restServer.send(200, "application/json", "{\"status\":\"ok\"}");
   });
 
-  // CORS Preflight Options handler
+  restServer.on("/stop", HTTP_POST, []() {
+    setCorsHeaders();
+    carStopped = true;
+    stopCar();
+    broadcastWsText("{\"type\":\"stopped\",\"stopped\":true}");
+    restServer.send(200, "application/json", "{\"status\":\"stopped\"}");
+  });
+
+  restServer.on("/start", HTTP_POST, []() {
+    setCorsHeaders();
+    carStopped = false;
+    if (!manualMode) autoState = AUTO_FORWARD;
+    broadcastWsText("{\"type\":\"started\",\"stopped\":false}");
+    restServer.send(200, "application/json", "{\"status\":\"started\"}");
+  });
+
+  restServer.on("/mode", HTTP_GET, []() {
+    setCorsHeaders();
+    if (restServer.hasArg("set")) {
+      String m = restServer.arg("set");
+      if (m == "auto") {
+        manualMode = false;
+        carStopped = false;
+        autoState  = AUTO_FORWARD;
+      } else {
+        manualMode = true;
+        autoState  = AUTO_STOPPED;
+        stopCar();
+      }
+      broadcastWsText("{\"type\":\"mode\",\"value\":\"" + String(manualMode ? "auto" : "manual") + "\"}");
+    }
+    restServer.send(200, "application/json", "{\"mode\":\"" + String(manualMode ? "manual" : "auto") + "\"}");
+  });
+
+  restServer.on("/rotate", HTTP_GET, []() {
+    setCorsHeaders();
+    if (restServer.hasArg("dir")) {
+      String rDir = restServer.arg("dir");
+      if (rDir == "left" || rDir == "90L") {
+        startNonBlockingRotate(90.0f, false);
+      } else if (rDir == "right" || rDir == "90R") {
+        startNonBlockingRotate(90.0f, true);
+      } else if (rDir == "360") {
+        startNonBlockingRotate(360.0f, true);
+      }
+    }
+    restServer.send(200, "application/json", "{\"status\":\"rotating\"}");
+  });
+
+  restServer.on("/servo", HTTP_GET, []() {
+    setCorsHeaders();
+    if (restServer.hasArg("angle")) {
+      int ang = constrain(restServer.arg("angle").toInt(), 0, 180);
+      setRadarServo(ang);
+    }
+    restServer.send(200, "application/json", "{\"angle\":" + String(radarServo.read())
+                   + ",\"distance\":" + String(readUltrasonicCM()) + "}");
+  });
+
+  restServer.on("/scan", HTTP_GET, []() {
+    setCorsHeaders();
+    startRadarScan();
+    restServer.send(200, "application/json", "{\"status\":\"scanning\"}");
+  });
+
+  restServer.on("/scanResult", HTTP_GET, []() {
+    setCorsHeaders();
+    String json = "{\"left\":" + String(scanDistLeft)
+                + ",\"front\":" + String(scanDistFront)
+                + ",\"right\":" + String(scanDistRight)
+                + ",\"done\":" + String(radarState == SCAN_DONE ? "true" : "false") + "}";
+    restServer.send(200, "application/json", json);
+  });
+
+  restServer.on("/calibrate_gyro", HTTP_POST, []() {
+    setCorsHeaders();
+    calibrateGyro();
+    broadcastWsText("{\"type\":\"gyro_calibrated\",\"success\":true,\"bias\":" + String(gyroZBias, 4) + "}");
+    restServer.send(200, "application/json", "{\"status\":\"ok\",\"bias\":" + String(gyroZBias, 4) + "}");
+  });
+
+  restServer.on("/wifi/scan", HTTP_GET, []() {
+    setCorsHeaders();
+    int n = WiFi.scanNetworks(false, false);
+    String json = "{\"networks\":[";
+    for (int i = 0; i < n; i++) {
+      if (i > 0) json += ",";
+      json += "{\"ssid\":\"" + WiFi.SSID(i) + "\",\"rssi\":" + String(WiFi.RSSI(i)) + "}";
+    }
+    json += "]}";
+    restServer.send(200, "application/json", json);
+  });
+
+  restServer.on("/wifi/saved", HTTP_GET, []() {
+    setCorsHeaders();
+    String json = "{\"selected\":" + String(selectedNetIdx) + ",\"networks\":[";
+    for (int i = 0; i < MAX_SAVED_NETS; i++) {
+      if (i > 0) json += ",";
+      json += "{\"ssid\":\"" + String(savedNets[i].valid ? savedNets[i].ssid : "") + "\"}";
+    }
+    json += "]}";
+    restServer.send(200, "application/json", json);
+  });
+
+  restServer.on("/wifi/save", HTTP_GET, []() {
+    setCorsHeaders();
+    if (restServer.hasArg("ssid")) {
+      String s = restServer.arg("ssid");
+      String p = restServer.hasArg("password") ? restServer.arg("password") : "";
+      int slot = selectedNetIdx;
+      for (int i = 0; i < MAX_SAVED_NETS; i++) {
+        if (!savedNets[i].valid || String(savedNets[i].ssid) == s) { slot = i; break; }
+      }
+      strncpy(savedNets[slot].ssid, s.c_str(), 32);
+      strncpy(savedNets[slot].pass, p.c_str(), 64);
+      savedNets[slot].valid = 1;
+      selectedNetIdx = slot;
+      saveSavedNetworks();
+      WiFi.begin(savedNets[slot].ssid, savedNets[slot].pass);
+    }
+    restServer.send(200, "application/json", "{\"status\":\"ok\"}");
+  });
+
+  restServer.on("/wifi/select", HTTP_GET, []() {
+    setCorsHeaders();
+    if (restServer.hasArg("index")) {
+      int idx = constrain(restServer.arg("index").toInt(), 0, MAX_SAVED_NETS - 1);
+      selectedNetIdx = idx;
+      saveSavedNetworks();
+      if (savedNets[idx].valid) {
+        WiFi.begin(savedNets[idx].ssid, savedNets[idx].pass);
+      }
+    }
+    restServer.send(200, "application/json", "{\"status\":\"ok\"}");
+  });
+
+  restServer.on("/wifi/delete", HTTP_GET, []() {
+    setCorsHeaders();
+    if (restServer.hasArg("index")) {
+      int idx = constrain(restServer.arg("index").toInt(), 0, MAX_SAVED_NETS - 1);
+      savedNets[idx].valid = 0;
+      savedNets[idx].ssid[0] = '\0';
+      savedNets[idx].pass[0] = '\0';
+      saveSavedNetworks();
+    }
+    restServer.send(200, "application/json", "{\"status\":\"ok\"}");
+  });
+
+  restServer.on("/wifi/switchSta", HTTP_GET, []() {
+    setCorsHeaders();
+    String host = "http://" + (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString());
+    String ssid = savedNets[selectedNetIdx].valid ? String(savedNets[selectedNetIdx].ssid) : "NovaX-Car";
+    restServer.send(200, "application/json", "{\"status\":\"ok\",\"host\":\"" + host + "\",\"ssid\":\"" + ssid + "\"}");
+  });
+
+  restServer.on("/wifi/switchAp", HTTP_GET, []() {
+    setCorsHeaders();
+    WiFi.softAP(AP_DEFAULT_SSID, AP_DEFAULT_PASS);
+    restServer.send(200, "application/json", "{\"status\":\"ok\",\"host\":\"http://192.168.4.1\"}");
+  });
+
+  restServer.on("/update", HTTP_POST, handleOtaFinish, handleOtaUpload);
+  restServer.on("/ota/update", HTTP_POST, handleOtaFinish, handleOtaUpload);
+
   restServer.onNotFound([]() {
     if (restServer.method() == HTTP_OPTIONS) {
       setCorsHeaders();
@@ -1431,73 +2269,109 @@ void setup() {
     }
   });
 
-  const char* headerKeys[] = {"X-NovaX-OTA"};
-  restServer.collectHeaders(headerKeys, 1);
+  // 12. Start HTTP
   restServer.begin();
 
+  // 13. Start WebSocket
   wsServer.begin();
   wsServer.setNoDelay(true);
 
-  // Confirm radar servo is centered and ready
-  setRadarServo(90);
+  // 14. Start camera TCP
+  if (cameraAvailable) {
+    cameraTcpServer.begin();
+  }
 
-  manualMode  = true;
-  carStopped  = false;
-  autoState   = AUTO_STOPPED;
   stopCar();
 
-  Serial.printf("[NovaX V2] Ready | FW %s | IMU: %s (0x%02X)\n",
-    FIRMWARE_VERSION,
-    mpuAvailable ? "MPU6050" : "None",
-    mpuI2cAddress);
+  Serial.println("\n========================================");
+  Serial.println("NovaX READY");
+  Serial.println("========================================\n");
 }
 
 // ===================================================================================
-// 11. MAIN LOOP
+// 13. MAIN LOOP
 // ===================================================================================
 void loop() {
+  // 1. Network & Control Handlers
   restServer.handleClient();
   pollWebSocketServer();
-  processPendingStaConnect();
+
+  // 2. Gyroscope & Attitude Updates
   updateGyroHeading();
-  stepNonBlockingRotate();
-  stepMotorRamp();
-  stepRadarScan();
-  updateLEDs();
 
-  if (!manualMode) {
-    stepAutoNav();
+  // Temporary IMU Serial Diagnostics (Every 500ms)
+#if SERIAL_ENABLED
+  static unsigned long lastImuDiagMs = 0;
+  if (millis() - lastImuDiagMs >= 500) {
+    lastImuDiagMs = millis();
+    if (mpuAvailable) {
+      Serial.println("[IMU]");
+      Serial.printf("AX=%.3f\nAY=%.3f\nAZ=%.3f\n", rawAX, rawAY, rawAZ);
+      Serial.printf("GX=%.4f\nGY=%.4f\nGZ=%.4f\n", rawGX, rawGY, rawGZ);
+      Serial.printf("YAW=%.2f\nPITCH=%.2f\nROLL=%.2f\n", yawHeading, pitchAngle, rollAngle);
+    } else {
+      Serial.println("[IMU] MPU6050 NOT DETECTED (GYRO: OFF)");
+    }
   }
+#endif
 
-  // Motor Safety Watchdog (400ms)
+  // 3. Motor Safety Watchdog & Ramp Slew
   if (manualMode && motorRunning && rotateState == ROT_IDLE
       && (millis() - lastDriveCmdMs > MOTOR_WATCHDOG_MS)) {
     stopCar();
   }
+  stepNonBlockingRotate();
+  stepMotorRamp();
 
-  // Periodic Telemetry Stream (100ms)
+  // 4. Autonomous Collision Avoidance & Radar
+  if (!manualMode) {
+    stepAutoNav();
+  }
+  stepRadarScan();
+
+  // 5. LED State Machine
+  updateLEDs();
+
+  // 6. Camera TCP Streaming Service (Independent & Non-Blocking)
+  stepCameraService();
+
+  // 7. Periodic WebSocket Telemetry Stream (100ms)
   static unsigned long lastTelems = 0;
   if (millis() - lastTelems >= 100) {
     lastTelems = millis();
-    long   d        = readUltrasonicCM();
-    String wifiMode = (WiFi.status() == WL_CONNECTED ? "STA" : "AP");
-    String ip       = (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString());
+    long d = readUltrasonicCM();
     String telem = "{\"type\":\"telemetry\",";
-    telem += "\"distance\":"   + String(d)              + ",";
-    telem += "\"heading\":"    + String(yawHeading, 1)  + ",";
-    telem += "\"pitch\":"      + String(pitchAngle, 1)  + ",";
-    telem += "\"roll\":"       + String(rollAngle, 1)   + ",";
-    telem += "\"mode\":\""     + String(manualMode ? "manual" : "auto") + "\",";
-    telem += "\"stopped\":"    + String(carStopped ? "true" : "false") + ",";
-    telem += "\"rotating\":"   + String(rotateState == ROT_TURNING ? "true" : "false") + ",";
     telem += "\"version\":\""  + String(FIRMWARE_VERSION)  + "\",";
-    telem += "\"camera\":false,";
-    telem += "\"wifiMode\":\"" + wifiMode + "\",";
-    telem += "\"ip\":\""       + ip       + "\",";
+    telem += "\"distance\":"   + String(d)                 + ",";
+    telem += "\"heading\":"    + String(yawHeading, 1)     + ",";
+    telem += "\"yaw\":"        + String(yawHeading, 1)     + ",";
+    telem += "\"pitch\":"      + String(pitchAngle, 1)     + ",";
+    telem += "\"roll\":"       + String(rollAngle, 1)      + ",";
+    telem += "\"mode\":\""     + String(manualMode ? "manual" : "auto") + "\",";
+    telem += "\"stopped\":"    + String(carStopped ? "true" : "false")  + ",";
+    telem += "\"battery\":4.15,";
+    telem += "\"wifiMode\":\"" + String(WiFi.getMode() == WIFI_MODE_APSTA ? "AP+STA" : "AP") + "\",";
+    telem += "\"ip\":\""       + WiFi.softAPIP().toString() + "\",";
+    telem += "\"camera\":"     + String(cameraAvailable ? "true" : "false") + ",";
+    telem += "\"gyro\":"       + String(mpuAvailable ? "true" : "false")    + ",";
     telem += "\"uptime\":"     + String(millis() / 1000);
     telem += "}";
     broadcastWsText(telem);
   }
 
-  delay(2);
+  // 8. Periodic Serial Debug Telemetry (1000ms)
+#if SERIAL_ENABLED
+  static unsigned long lastSerialDbgMs = 0;
+  if (millis() - lastSerialDbgMs >= 1000) {
+    lastSerialDbgMs = millis();
+    long d = readUltrasonicCM();
+    Serial.printf("[STATUS] CAM: %-3s | IMU: %-4s | Yaw: %5.1f | Pitch: %4.1f | Roll: %4.1f | Sonar: %3ld cm | Servo: %3d deg\n",
+      cameraAvailable ? "ON" : "OFF",
+      mpuAvailable ? "OK" : "NONE",
+      yawHeading, pitchAngle, rollAngle, d, radarServo.read());
+  }
+#endif
+
+  delay(1);
+  yield();
 }

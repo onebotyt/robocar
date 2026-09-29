@@ -70,7 +70,7 @@ function setConnectionState(online, proto = 'HTTP', isBootstrap = false) {
     if (online && isBootstrap) {
       badge.textContent = 'BOOTSTRAP';
       badge.className = 'comm-badge bootstrap';
-      badge.title = 'ESP32 in Bootstrap Mode — Ready for OTA Firmware Flash';
+      badge.title = 'Robot Car in Bootstrap Mode — Ready for OTA Firmware Flash';
     } else if (online && proto === 'WS') {
       badge.textContent = 'WS LIVE';
       badge.className = 'comm-badge ws-live';
@@ -240,7 +240,7 @@ async function preDownloadFirmware() {
     if (blob.size < 50000) throw new Error(`Binary too small (${blob.size} bytes)`);
     await saveFirmwareToLocalCache(blob, 'latest');
     updateCachedFwStatus();
-    alert(`✅ Firmware downloaded and saved on your phone (${Math.round(blob.size / 1024)} KB)!\n\nYou can now connect to "NovaX-Car" Wi-Fi and tap "⚡ Flash Pre-Downloaded Firmware" to upload it to the ESP32 without internet.`);
+    alert(`✅ Firmware downloaded and saved on your phone (${Math.round(blob.size / 1024)} KB)!\n\nYou can now connect to "NovaX-Car" Wi-Fi and tap "⚡ Flash Pre-Downloaded Firmware" to upload it to your robot car without internet.`);
   } catch (err) {
     if (el) el.textContent = `❌ Download failed: ${err.message}`;
     alert(`Could not download firmware: ${err.message}\nMake sure your phone has internet (Wi-Fi or Mobile Data).`);
@@ -261,10 +261,10 @@ async function pingCar() {
     const ver = data.version || data.firmware || (data.status === 'bootstrap' ? 'BOOTSTRAP' : 'Online');
     const isBoot = data.status === 'bootstrap' || String(ver).includes('BOOTSTRAP');
     setConnectionState(true, wsConnected ? 'WS' : 'HTTP', isBoot);
-    alert(`🟢 ESP32 Responded!\n\nHost: ${base}\nLatency: ${ms} ms\nVersion: ${ver}\nMode: ${isBoot ? 'Bootstrap Mode (Ready to Flash)' : (data.mode || 'Normal')}`);
+    alert(`🟢 Robot Car Responded!\n\nHost: ${base}\nLatency: ${ms} ms\nVersion: ${ver}\nMode: ${isBoot ? 'Bootstrap Mode (Ready to Flash)' : (data.mode || 'Normal')}`);
   } catch (err) {
     setConnectionState(false);
-    alert(`🔴 ESP32 Did Not Respond!\n\nHost: ${base}\nError: ${err.message}\n\nPlease check:\n1. Your phone Wi-Fi is connected to "NovaX-Car"\n2. Car is powered on and within range`);
+    alert(`🔴 Robot Car Did Not Respond!\n\nHost: ${base}\nError: ${err.message}\n\nPlease check:\n1. Your phone Wi-Fi is connected to "NovaX-Car"\n2. Car is powered on and within range`);
   }
 }
 
@@ -682,8 +682,9 @@ async function updateStatus() {
 // ================= DRIVE CONTROLS (D-PAD & MOTOR WATCHDOG) =================
 let moveInterval = null;
 let currentMoveCmd = 'S';
+let currentDriveSpeed = 180;
 
-async function sendMove(cmd, speed = 180) {
+async function sendMove(cmd, speed = currentDriveSpeed) {
   // If in AUTO mode, lock user driving controls completely
   if (currentMode === 'auto') return;
 
@@ -730,11 +731,11 @@ $$('[data-move]').forEach((btn) => {
     e.preventDefault();
     vibrate(18);
     btn.classList.add('active');
-    sendMove(dir);
+    sendMove(dir, currentDriveSpeed);
 
-    // Continuous refresh every 100ms keeps ESP32 400ms watchdog alive
+    // Continuous refresh every 100ms keeps watchdog alive
     clearInterval(moveInterval);
-    moveInterval = setInterval(() => sendMove(dir), 100);
+    moveInterval = setInterval(() => sendMove(dir, currentDriveSpeed), 100);
   };
 
   const stopDrive = (e) => {
@@ -827,17 +828,17 @@ if ($('rot360Btn')) {
   };
 }
 
-// 74HC595 Shift Register LED Effects
-$$('[data-led]').forEach((btn) => {
-  btn.onclick = async () => {
+// Drive Speed Profile Selection
+$$('[data-speed]').forEach((btn) => {
+  btn.onclick = () => {
     vibrate(15);
-    $$('[data-led]').forEach((b) => b.classList.remove('active'));
+    $$('[data-speed]').forEach((b) => {
+      b.classList.remove('active');
+      b.classList.remove('blue');
+    });
     btn.classList.add('active');
-    const eff = btn.dataset.led;
-
-    if (!sendWs({ type: 'led', pattern: eff })) {
-      await api(`/led?effect=${eff}`).catch(() => {});
-    }
+    btn.classList.add('blue');
+    currentDriveSpeed = parseInt(btn.dataset.speed, 10) || 180;
   };
 });
 
@@ -1077,6 +1078,92 @@ if ($('servoRightBtn')) {
   };
 }
 
+// ================= LIVE OV7670 CAMERA CONTROLLER (CENTER CARD) =================
+let camOn = false;
+let camTimer = null;
+let camFrameCount = 0;
+let lastFpsTime = performance.now();
+
+async function fetchCamFrame() {
+  if (!camOn) return;
+  const img = $('cam');
+  if (!img) return;
+  try {
+    const res = await fetch(`${base}/cam.jpg?t=${Date.now()}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const blob = await res.blob();
+    if (!camOn) return;
+    const oldUrl = img.src;
+    img.src = URL.createObjectURL(blob);
+    img.style.display = 'block';
+    if (oldUrl && oldUrl.startsWith('blob:')) {
+      setTimeout(() => URL.revokeObjectURL(oldUrl), 500);
+    }
+    const standby = $('camStandby');
+    if (standby) standby.classList.remove('active');
+    camFrameCount++;
+    const now = performance.now();
+    if (now - lastFpsTime >= 1000) {
+      if ($('camFpsVal')) $('camFpsVal').textContent = camFrameCount;
+      camFrameCount = 0;
+      lastFpsTime = now;
+    }
+    if (camOn) camTimer = setTimeout(fetchCamFrame, 50); // ~15-20 FPS polling
+  } catch (e) {
+    if (camOn) camTimer = setTimeout(fetchCamFrame, 250);
+  }
+}
+
+if ($('camToggleBtn')) {
+  $('camToggleBtn').onclick = () => {
+    camOn = !camOn;
+    vibrate(20);
+    const btn = $('camToggleBtn');
+    const standby = $('camStandby');
+    const badge = $('camStateBadge');
+    const img = $('cam');
+
+    if (camOn) {
+      btn.textContent = 'Camera OFF';
+      btn.classList.add('active');
+      if (badge) {
+        badge.textContent = 'LIVE';
+        badge.style.color = '#10b981';
+      }
+      if (standby) standby.classList.remove('active');
+      fetchCamFrame();
+    } else {
+      btn.textContent = 'Camera ON';
+      btn.classList.remove('active');
+      if (badge) {
+        badge.textContent = 'STANDBY';
+        badge.style.color = 'var(--text-dim)';
+      }
+      if (standby) standby.classList.add('active');
+      if (img) img.style.display = 'none';
+      clearTimeout(camTimer);
+      if ($('camFpsVal')) $('camFpsVal').textContent = '0';
+    }
+  };
+}
+
+if ($('camSnapBtn')) {
+  $('camSnapBtn').onclick = () => {
+    vibrate(25);
+    const img = $('cam');
+    if (!img || !img.src || !camOn) {
+      alert('Turn Camera ON first to take a snapshot.');
+      return;
+    }
+    const a = document.createElement('a');
+    a.href = img.src;
+    a.download = `novax_cam_${Date.now()}.jpg`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+}
+
 // ================= MPU6050 GYROSCOPE ATTITUDE VISUALIZER & CALIBRATION =================
 let currentHeadingDeg = 0;
 let currentPitchDeg = 0;
@@ -1163,7 +1250,12 @@ if ($('calibrateGyroBtn')) {
 if ($('openSettingsModalBtn')) {
   $('openSettingsModalBtn').onclick = () => {
     if ($('settingsModal')) $('settingsModal').style.display = 'flex';
+    if ($('hostUrlInput')) $('hostUrlInput').value = base;
     updateCachedFwStatus();
+    loadSavedWifi();
+    updateStatus();
+    const activeVer = localStorage.getItem('novax_hot_version') || CURRENT_APP_VERSION;
+    if ($('installedAppVer')) $('installedAppVer').textContent = `v${activeVer}`;
   };
 }
 
@@ -1195,9 +1287,9 @@ if ($('saveHostBtn')) {
     try {
       const t0 = performance.now();
       let res = await jsonApi('/status', { timeout: 2000 });
-      alert(`🟢 Reachable! ESP32 responded at ${base} in ${Math.round(performance.now() - t0)}ms.`);
+      alert(`🟢 Reachable! Car responded at ${base} in ${Math.round(performance.now() - t0)}ms.`);
     } catch (e) {
-      alert(`⚠️ Saved host (${base}), but ESP32 is not responding.\n\nPlease check:\n1. Your phone/PC Wi-Fi is connected to "NovaX-Car"\n2. Car is powered ON and within range.`);
+      alert(`⚠️ Saved host (${base}), but car is not responding.\n\nPlease check:\n1. Your phone/PC Wi-Fi is connected to "NovaX-Car"\n2. Car is powered ON and within range.`);
     }
   };
 }
@@ -1359,7 +1451,7 @@ async function uploadFirmwareToCar(binBlob, token, msgEl) {
 
   try { await stopCar(); } catch (e) {}
 
-  if (msgEl) msgEl.textContent = '2/3 Uploading firmware to ESP32...';
+  if (msgEl) msgEl.textContent = '2/3 Uploading firmware to car...';
 
   const updateProgress = (pct, l, t) => {
     const text = `⚡ Flashing: ${pct}% (${Math.round(l/1024)} / ${Math.round(t/1024)} KB)... Do not turn off!`;
@@ -1376,14 +1468,14 @@ async function uploadFirmwareToCar(binBlob, token, msgEl) {
     resText = await uploadBinaryWithProgress(binBlob, '/update', token, updateProgress);
   }
 
-  if (msgEl) msgEl.textContent = '✅ Flashing complete! ESP32 restarting...';
+  if (msgEl) msgEl.textContent = '✅ Flashing complete! Car restarting...';
   if (bannerBtn) {
     bannerBtn.textContent = 'RESTARTING...';
     setTimeout(() => { if ($('bootstrapOtaBanner')) $('bootstrapOtaBanner').style.display = 'none'; }, 6000);
   }
   if (flashBtn) {
     flashBtn.disabled = false;
-    flashBtn.textContent = '⚡ Flash Pre-Downloaded Firmware to ESP32';
+    flashBtn.textContent = '⚡ Flash Pre-Downloaded Firmware';
   }
   return resText;
 }
@@ -1401,12 +1493,12 @@ async function flashCachedFirmware() {
   }
 
   const kb = Math.round(cachedBlob.size / 1024);
-  if (!confirm(`Flash pre-downloaded firmware (${kb} KB) to ESP32?\n\nMake sure your phone Wi-Fi is connected to "NovaX-Car".\nCar motors will stop safely.`)) return;
+  if (!confirm(`Flash pre-downloaded firmware (${kb} KB) to car?\n\nMake sure your phone Wi-Fi is connected to "NovaX-Car".\nCar motors will stop safely.`)) return;
 
   const token = $('otaTokenInput')?.value.trim() || 'NovaX-OTA-ChangeMe';
   try {
     await uploadFirmwareToCar(cachedBlob, token, msg);
-    alert('🎉 ESP32 Firmware Flashed Successfully!\n\nYour car is rebooting now into NovaX V2. Reconnect Wi-Fi to "NovaX-Car" in 10 seconds.');
+    alert('🎉 Firmware Flashed Successfully!\n\nYour car is rebooting now. Reconnect Wi-Fi to "NovaX-Car" in 10 seconds.');
   } catch (err) {
     console.error('Cached flash error:', err);
     if (msg) msg.textContent = `❌ Flash Failed: ${err.message}`;
@@ -1424,16 +1516,16 @@ if ($('fwUpdateBtn')) {
     vibrate(35);
     const file = $('fwFileInput')?.files[0];
     if (!file) {
-      alert('Select an ESP32 .bin firmware file first.');
+      alert('Select a .bin firmware file first.');
       return;
     }
     const token = $('otaTokenInput')?.value.trim() || 'NovaX-OTA-ChangeMe';
-    if (!confirm(`Flash "${file.name}" to ESP32?\nAll motors will be safely stopped during update.`)) return;
+    if (!confirm(`Flash "${file.name}" to car?\nAll motors will be safely stopped during update.`)) return;
 
     const msg = $('fwMsg') || $('cloudOtaProgress');
     try {
       await uploadFirmwareToCar(file, token, msg);
-      alert('Firmware flashed successfully! ESP32 is rebooting.');
+      alert('Firmware flashed successfully! Car is rebooting.');
     } catch (err) {
       if (msg) msg.textContent = `OTA Error: ${err.message}`;
       alert(`OTA Error: ${err.message}`);
@@ -1453,7 +1545,7 @@ async function flashCloudOta() {
   const { repo, branch } = getGitHubConfig();
   const token = $('otaTokenInput')?.value.trim() || 'NovaX-OTA-ChangeMe';
 
-  if (!confirm(`Flash latest ESP32 firmware binary (${repo}) to car?\n\nCar motors will be safely stopped during update.`)) {
+  if (!confirm(`Flash latest firmware binary (${repo}) to car?\n\nCar motors will be safely stopped during update.`)) {
     if (msg) msg.style.display = 'none';
     return;
   }
@@ -1499,7 +1591,7 @@ async function flashCloudOta() {
     }
 
     await uploadFirmwareToCar(binBlob, token, msg);
-    alert('🎉 ESP32 Firmware flashed successfully!\nNovaX is rebooting now into the full robot car firmware.');
+    alert('🎉 Firmware flashed successfully!\nNovaX is rebooting now into the full robot car firmware.');
   } catch (err) {
     console.error('Cloud OTA Error:', err);
     if (msg) msg.textContent = `❌ Cloud OTA Failed: ${err.message}`;
@@ -1704,6 +1796,108 @@ async function preDownloadFirmwareSilent() {
   } catch (e) {}
 }
 
+// ================= LIVE CAMERA CONTROLLER CENTER STREAM =================
+let isCamActive = false;
+let camPolling = false;
+let camFpsCount = 0;
+let camLastFpsTime = performance.now();
+let camAbortController = null;
+
+function setCameraState(active) {
+  isCamActive = active;
+  const toggleBtn = $('camToggleBtn');
+  const standby = $('camStandby');
+  const badge = $('camStateBadge');
+  const camImg = $('cam');
+
+  if (active) {
+    if (toggleBtn) {
+      toggleBtn.textContent = 'Camera OFF';
+      toggleBtn.className = 'pill-btn active red';
+    }
+    if (standby) standby.classList.remove('active');
+    if (badge) {
+      badge.textContent = 'LIVE STREAM';
+      badge.className = 'card-mode-tag live';
+    }
+    startCamStream();
+  } else {
+    if (toggleBtn) {
+      toggleBtn.textContent = 'Camera ON';
+      toggleBtn.className = 'pill-btn blue';
+    }
+    if (standby) standby.classList.add('active');
+    if (badge) {
+      badge.textContent = 'CAM STANDBY';
+      badge.className = 'card-mode-tag';
+    }
+    stopCamStream();
+    if (camImg) camImg.src = '';
+    if ($('camFpsVal')) $('camFpsVal').textContent = '0';
+  }
+}
+
+async function startCamStream() {
+  if (camPolling) return;
+  camPolling = true;
+
+  while (isCamActive && camPolling) {
+    try {
+      const url = `${base}/cam.jpg?t=${Date.now()}`;
+      camAbortController = new AbortController();
+      const res = await fetch(url, { signal: camAbortController.signal, cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const camImg = $('cam');
+      if (camImg) {
+        const oldSrc = camImg.src;
+        camImg.src = objectUrl;
+        if (oldSrc && oldSrc.startsWith('blob:')) {
+          URL.revokeObjectURL(oldSrc);
+        }
+      }
+      camFpsCount++;
+      const now = performance.now();
+      if (now - camLastFpsTime >= 1000) {
+        const fps = Math.round((camFpsCount * 1000) / (now - camLastFpsTime));
+        if ($('camFpsVal')) $('camFpsVal').textContent = fps;
+        camFpsCount = 0;
+        camLastFpsTime = now;
+      }
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        await new Promise(r => setTimeout(r, 200));
+      }
+    }
+    await new Promise(r => setTimeout(r, 30));
+  }
+  camPolling = false;
+}
+
+function stopCamStream() {
+  camPolling = false;
+  if (camAbortController) {
+    try { camAbortController.abort(); } catch (e) {}
+    camAbortController = null;
+  }
+}
+
+function takeCameraSnapshot() {
+  const camImg = $('cam');
+  if (!camImg || !camImg.src || !camImg.src.startsWith('blob:')) {
+    showToast('Enable Camera first for snapshot');
+    return;
+  }
+  const a = document.createElement('a');
+  a.href = camImg.src;
+  a.download = `NovaX_Snap_${Date.now()}.jpg`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  showToast('Snapshot downloaded');
+}
+
 // ================= APP INITIALIZATION =================
 window.addEventListener('DOMContentLoaded', () => {
   if ($('hostUrlInput')) $('hostUrlInput').value = base;
@@ -1713,6 +1907,20 @@ window.addEventListener('DOMContentLoaded', () => {
 
   const activeVer = localStorage.getItem('novax_hot_version') || CURRENT_APP_VERSION;
   if ($('installedAppVer')) $('installedAppVer').textContent = `v${activeVer}`;
+
+  // Camera Button Bindings
+  if ($('camToggleBtn')) {
+    $('camToggleBtn').onclick = () => {
+      vibrate(20);
+      setCameraState(!isCamActive);
+    };
+  }
+  if ($('camSnapBtn')) {
+    $('camSnapBtn').onclick = () => {
+      vibrate(20);
+      takeCameraSnapshot();
+    };
+  }
 
   // HTTPS Mixed Content Warning (Browsers block http://192.168.4.1 when loaded over https://)
   if (window.location.protocol === 'https:' && window.location.hostname !== 'localhost') {
