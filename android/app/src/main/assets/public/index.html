@@ -24,7 +24,7 @@
   <script>
     (function() {
       // BUNDLE_VERSION must match CURRENT_APP_VERSION in app.js
-      var BUNDLE_VERSION = '2.4.55';
+      var BUNDLE_VERSION = '2.4.56';
       try {
         var params = new URLSearchParams(window.location.search);
         if (params.has('reset') || params.has('clear') || params.has('clean')) {
@@ -234,10 +234,10 @@
 
         <!-- Precision Rotation Controls (Moved to Center) -->
         <div class="control-group center-control-group">
-          <div class="group-title">Precision Rotation (Gyro)</div>
+          <div class="group-title">Precision Rotation</div>
           <div class="pill-row">
             <button id="rotLBtn" class="pill-btn center-act-btn" title="Rotate 90° Left">↺ 90° Left</button>
-            <button id="rot360Btn" class="pill-btn blue center-act-btn" title="360° Gyro Spin">⟳ 360°</button>
+            <button id="rot360Btn" class="pill-btn blue center-act-btn" title="360° Spin">⟳ 360°</button>
             <button id="rotRBtn" class="pill-btn center-act-btn" title="Rotate 90° Right">↻ 90° Right</button>
           </div>
         </div>
@@ -254,10 +254,10 @@
         </div>
       </section>
 
-      <!-- ================= 3. RADAR & ATTITUDE GYRO CARD ================= -->
+      <!-- ================= 3. RADAR & DISTANCE CARD ================= -->
       <section class="card card-radar">
         <div class="card-header-simple">
-          <span class="card-title">Radar & Gyro</span>
+          <span class="card-title">Ultrasonic Radar</span>
           <span class="card-mode-tag" id="radarStatusTag">IDLE</span>
         </div>
 
@@ -294,8 +294,8 @@
           </button>
         </div>
 
-        <!-- GYRO ATTITUDE SENSOR VISUALIZATION (BELOW RADAR) -->
-        <div class="gyro-attitude-container">
+        <!-- GYRO ATTITUDE SENSOR VISUALIZATION (HIDDEN IN CAMERA-ONLY MODE) -->
+        <div class="gyro-attitude-container" style="display:none;">
           <div class="group-title-row">
             <span class="group-title">Attitude & Gyroscope</span>
             <span class="gyro-heading-badge" id="gyroCompassHeading">0° N</span>
@@ -461,7 +461,7 @@
   <!-- Dynamic In-App Hot JS Loader with Automatic Bundled Fallback -->
   <script>
     (function() {
-      var BUNDLE_VERSION = '2.4.55';
+      var BUNDLE_VERSION = '2.4.56';
       function _verGT(a, b) {
         var pa = (a||'').split('.').map(Number);
         var pb = (b||'').split('.').map(Number);

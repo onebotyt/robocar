@@ -14,12 +14,9 @@
  */
 
 #include <Arduino.h>
+#include <Wire.h>
 #include <WiFi.h>
 #include <WebServer.h>
-#define sensor_t adafruit_sensor_t
-#include <Adafruit_MPU6050.h>
-#include <Adafruit_Sensor.h>
-#undef sensor_t
 #include <ESP32Servo.h>
 #include <Preferences.h>
 #include <ESPmDNS.h>
@@ -62,8 +59,8 @@
 #define NVX_CAM_PCLK    14   // GPIO14 (Pixel Clock to I2S0)
 #define NVX_CAM_VSYNC   13   // GPIO13 (Frame VSYNC to I2S0 & ISR)
 // Note: HREF is physically DISCONNECTED / NOT USED (routed internally to 0x38 logic-HIGH)
-#define NVX_CAM_SIOD    21   // GPIO21 (Shared I2C SDA with MPU6050, 4.7k pull-up to 3.3V)
-#define NVX_CAM_SIOC    22   // GPIO22 (Shared I2C SCL with MPU6050, 4.7k pull-up to 3.3V)
+#define NVX_CAM_SIOD    21   // GPIO21 (Camera SCCB SDA, 4.7k pull-up to 3.3V)
+#define NVX_CAM_SIOC    22   // GPIO22 (Camera SCCB SCL, 4.7k pull-up to 3.3V)
 
 // Camera Frame Dimensions & Output
 #define NVX_FRAME_W     160
@@ -90,11 +87,6 @@
 #define LED_LATCH       12   // GPIO12 (RCLK / Storage Register Latch)
 // 74HC595: VCC=3.3V, GND=GND, OE=GND, MR=3.3V
 
-// --- MPU6050 6-DOF IMU ---
-#define MPU_SDA         21   // Shared I2C Data
-#define MPU_SCL         22   // Shared I2C Clock
-#define MPU_ADDR        0x68 // I2C Address (AD0 connected to GND)
-#define GYRO_REVERSE_Z  false // Set to true if yaw rotation direction is inverted
 
 #define SERIAL_ENABLED   1
 
@@ -155,7 +147,6 @@ WiFiClient       wsClients[MAX_WS_CLIENTS];
 WiFiServer       cameraTcpServer(CAM_TCP_PORT);
 WiFiClient       cameraTcpClient;
 Servo            radarServo;
-Adafruit_MPU6050 mpu;
 Preferences      nvsPrefs;
 
 // Camera State
@@ -180,20 +171,12 @@ int currentPwmLeft         = 0;
 int currentPwmRight        = 0;
 unsigned long lastMotorRampMs = 0;
 
-// MPU6050 Attitude & Gyro State
-bool          mpuAvailable   = false;
+// Attitude State (Camera-Only Mode / Dead-Reckoning)
+const bool    mpuAvailable   = false;
 float         gyroZBias      = 0.0f;
 float         yawHeading     = 0.0f;
 float         pitchAngle     = 0.0f;
 float         rollAngle      = 0.0f;
-unsigned long lastGyroMicros = 0;
-// Raw IMU sensor values for 500ms diagnostics
-float         rawAX          = 0.0f;
-float         rawAY          = 0.0f;
-float         rawAZ          = 0.0f;
-float         rawGX          = 0.0f;
-float         rawGY          = 0.0f;
-float         rawGZ          = 0.0f;
 
 // 74HC595 LED State
 String        currentLedEffect = "off";
@@ -256,8 +239,6 @@ void updateLEDs();
 void write595(uint8_t val);
 void stepAutoNav();
 bool scanI2CBus();
-void initMPU();
-void updateGyroHeading();
 void calibrateGyro();
 void stepNonBlockingRotate();
 void pollWebSocketServer();
@@ -1281,14 +1262,13 @@ void stepRadarScan() {
 }
 
 // ===================================================================================
-// 8. MPU6050 ATTITUDE & GYRO
+// 8. I2C SCANNER & ROTATION CONTROLLER (CAMERA-ONLY MODE)
 // ===================================================================================
 
 bool scanI2CBus() {
-  Serial.println("[I2C] Scanning GPIO21 (SDA) / GPIO22 (SCL)...");
+  Serial.println("[I2C] Scanning GPIO21 (SIOD) / GPIO22 (SIOC)...");
   int nDevices = 0;
   bool ovFound  = false;
-  bool mpuFound = false;
 
   for (uint8_t address = 1; address < 127; ++address) {
     Wire.beginTransmission(address);
@@ -1298,12 +1278,6 @@ bool scanI2CBus() {
       if (address == 0x21) {
         Serial.print(" (OV7670 Camera SCCB)");
         ovFound = true;
-      } else if (address == 0x68) {
-        Serial.print(" (MPU6050 IMU - AD0=GND)");
-        mpuFound = true;
-      } else if (address == 0x69) {
-        Serial.print(" (MPU6050 IMU - AD0=VCC/Floating)");
-        mpuFound = true;
       }
       Serial.println();
       nDevices++;
@@ -1311,106 +1285,20 @@ bool scanI2CBus() {
   }
 
   if (nDevices == 0) {
-    Serial.println("[I2C] WARNING: No I2C devices acknowledged!");
-    Serial.println("[I2C] Ensure 3.3V power & 4.7k pull-ups on GPIO 21 (SDA) and GPIO 22 (SCL).");
+    Serial.println("[I2C] WARNING: No I2C/SCCB devices acknowledged!");
+    Serial.println("[I2C] Ensure 3.3V power & 4.7k pull-ups on GPIO 21 (SIOD) and GPIO 22 (SIOC).");
   } else {
     Serial.printf("[I2C] Scan complete: %d device(s) found.\n", nDevices);
-    if (ovFound && !mpuFound) {
-      Serial.println("[I2C] Notice: Camera (0x21) detected, but MPU6050 did NOT respond.");
-      Serial.println("[I2C] Check MPU6050 VCC, GND, SDA, and SCL wiring.");
-    }
   }
 
-  return mpuFound;
+  return ovFound;
 }
 
 void calibrateGyro() {
-  if (!mpuAvailable) return;
-  stopCar();
-  Serial.println("[MPU6050] Calibrating zero-rate bias...");
-  delay(500);
-
-  float sumZ = 0.0f;
-  for (int i = 0; i < 250; i++) {
-    sensors_event_t a, g, temp;
-    mpu.getEvent(&a, &g, &temp);
-    sumZ += g.gyro.z;
-    delay(2);
-    yield();
-  }
-
-  gyroZBias      = sumZ / 250.0f;
-  yawHeading     = 0.0f;
-  pitchAngle     = 0.0f;
-  rollAngle      = 0.0f;
-  lastGyroMicros = micros();
-
-  Serial.printf("[MPU6050] Gyro Z Bias = %.6f rad/s\n", gyroZBias);
-}
-
-void initMPU() {
-  Serial.println("\n[MPU6050] Initializing...");
-  uint8_t foundAddr = 0;
-
-  if (mpu.begin(0x68, &Wire)) {
-    foundAddr = 0x68;
-  } else {
-    delay(20);
-    if (mpu.begin(0x69, &Wire)) {
-      foundAddr = 0x69;
-    }
-  }
-
-  if (foundAddr == 0) {
-    mpuAvailable = false;
-    Serial.println("[MPU6050] NOT DETECTED at 0x68 or 0x69");
-    Serial.println("[MPU6050] GYRO: OFF (Operating in dead-reckoning fallback mode)");
-  } else {
-    mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
-    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-    mpuAvailable = true;
-    Serial.printf("[MPU6050] DETECTED at 0x%02X\n", foundAddr);
-    Serial.println("[MPU6050] Range: +/-8G | Gyro: +/-500 DPS");
-    calibrateGyro();
-    Serial.println("[MPU6050] READY");
-  }
-}
-
-void updateGyroHeading() {
-  if (!mpuAvailable) return;
-  sensors_event_t a, g, temp;
-  mpu.getEvent(&a, &g, &temp);
-
-  rawAX = a.acceleration.x;
-  rawAY = a.acceleration.y;
-  rawAZ = a.acceleration.z;
-  rawGX = g.gyro.x;
-  rawGY = g.gyro.y;
-  rawGZ = g.gyro.z;
-
-  unsigned long nowUs = micros();
-  float dt = (nowUs - lastGyroMicros) / 1000000.0f;
-  lastGyroMicros = nowUs;
-
-  if (dt <= 0.0f || dt > 0.2f) return;
-
-  // Integrated Yaw
-  float rateZ = rawGZ - gyroZBias;
-#if GYRO_REVERSE_Z
-  rateZ = -rateZ;
-#endif
-
-  yawHeading += rateZ * 57.2957795f * dt;
-  while (yawHeading <    0.0f) yawHeading += 360.0f;
-  while (yawHeading >= 360.0f) yawHeading -= 360.0f;
-
-  // Accelerometer Pitch & Roll
-  float rawPitch = atan2(rawAY, sqrt(rawAX * rawAX + rawAZ * rawAZ)) * 57.2957795f;
-  float rawRoll  = atan2(-rawAX, rawAZ) * 57.2957795f;
-
-  pitchAngle = pitchAngle * 0.85f + rawPitch * 0.15f;
-  rollAngle  = rollAngle  * 0.85f + rawRoll  * 0.15f;
+  // Camera-only mode: Gyro zeroed
+  yawHeading = 0.0f;
+  pitchAngle = 0.0f;
+  rollAngle  = 0.0f;
 }
 
 void startNonBlockingRotate(float targetDeg, bool turnRight) {
@@ -1425,8 +1313,8 @@ void startNonBlockingRotate(float targetDeg, bool turnRight) {
   rotateState     = ROT_TURNING;
   rotateTarget    = targetDeg;
   rotateTurnRight = turnRight;
-  rotateInitYaw   = yawHeading;
-  rotatePrevYaw   = yawHeading;
+  rotateInitYaw   = 0.0f;
+  rotatePrevYaw   = 0.0f;
   rotateAccumYaw  = 0.0f;
   rotateStartMs   = millis();
   motorRunning    = true;
@@ -1436,26 +1324,12 @@ void stepNonBlockingRotate() {
   if (rotateState != ROT_TURNING) return;
   lastDriveCmdMs = millis();
 
-  bool finished = false;
-  if (mpuAvailable) {
-    float delta = yawHeading - rotatePrevYaw;
-    if (delta > 180.0f) delta -= 360.0f;
-    else if (delta < -180.0f) delta += 360.0f;
-    rotateAccumYaw += fabs(delta);
-    rotatePrevYaw = yawHeading;
-
-    if (rotateAccumYaw >= rotateTarget || (millis() - rotateStartMs > 8000)) {
-      finished = true;
-    }
-  } else {
-    unsigned long estTime = (unsigned long)((rotateTarget / 90.0f) * 450.0f);
-    if (millis() - rotateStartMs >= estTime) finished = true;
-  }
-
-  if (finished) {
+  // Timed precision rotation (450ms per 90 degrees at TURN_SPEED_PWM)
+  unsigned long estTime = (unsigned long)((rotateTarget / 90.0f) * 450.0f);
+  if (millis() - rotateStartMs >= estTime) {
     stopCar();
     rotateState = ROT_IDLE;
-    broadcastWsText("{\"type\":\"rotate_done\",\"heading\":" + String(yawHeading, 1) + "}");
+    broadcastWsText("{\"type\":\"rotate_done\",\"heading\":0.0}");
   }
 }
 
@@ -1975,18 +1849,15 @@ void setup() {
   digitalWrite(NVX_CAM_SIOC, HIGH);
   delayMicroseconds(5);
 
-  // 5. Shared I2C Bus on GPIO 21 (SDA) and GPIO 22 (SCL) at 100 kHz
+  // 5. Camera SCCB Bus on GPIO 21 (SIOD) and GPIO 22 (SIOC) at 100 kHz
   Wire.begin(NVX_CAM_SIOD, NVX_CAM_SIOC, 100000);
   Wire.setClock(100000);
   Wire.setTimeOut(25);
 
-  // 6. Run I2C scanner to discover both camera (0x21) and IMU (0x68/0x69)
+  // 6. Run I2C scanner to discover camera (0x21)
   scanI2CBus();
 
-  // 7. Initialize MPU6050 FIRST (clean I2C state before camera register writes)
-  initMPU();
-
-  // 8. Initialize OV7670 Camera (160x120 QQVGA, Direct JPEG Stream)
+  // 7. Initialize OV7670 Camera (160x120 QQVGA, Direct JPEG Stream)
   s_jpegInput = (uint8_t*)heap_caps_malloc(NVX_FRAME_BYTES, MALLOC_CAP_8BIT);
   Serial.println("\n[OV7670] Initializing...");
   if (s_jpegInput && nvxCameraBegin()) {
@@ -2296,25 +2167,6 @@ void loop() {
   restServer.handleClient();
   pollWebSocketServer();
 
-  // 2. Gyroscope & Attitude Updates
-  updateGyroHeading();
-
-  // Temporary IMU Serial Diagnostics (Every 500ms)
-#if SERIAL_ENABLED
-  static unsigned long lastImuDiagMs = 0;
-  if (millis() - lastImuDiagMs >= 500) {
-    lastImuDiagMs = millis();
-    if (mpuAvailable) {
-      Serial.println("[IMU]");
-      Serial.printf("AX=%.3f\nAY=%.3f\nAZ=%.3f\n", rawAX, rawAY, rawAZ);
-      Serial.printf("GX=%.4f\nGY=%.4f\nGZ=%.4f\n", rawGX, rawGY, rawGZ);
-      Serial.printf("YAW=%.2f\nPITCH=%.2f\nROLL=%.2f\n", yawHeading, pitchAngle, rollAngle);
-    } else {
-      Serial.println("[IMU] MPU6050 NOT DETECTED (GYRO: OFF)");
-    }
-  }
-#endif
-
   // 3. Motor Safety Watchdog & Ramp Slew
   if (manualMode && motorRunning && rotateState == ROT_IDLE
       && (millis() - lastDriveCmdMs > MOTOR_WATCHDOG_MS)) {
@@ -2353,7 +2205,7 @@ void loop() {
     telem += "\"wifiMode\":\"" + String(WiFi.getMode() == WIFI_MODE_APSTA ? "AP+STA" : "AP") + "\",";
     telem += "\"ip\":\""       + WiFi.softAPIP().toString() + "\",";
     telem += "\"camera\":"     + String(cameraAvailable ? "true" : "false") + ",";
-    telem += "\"gyro\":"       + String(mpuAvailable ? "true" : "false")    + ",";
+    telem += "\"gyro\":false,";
     telem += "\"uptime\":"     + String(millis() / 1000);
     telem += "}";
     broadcastWsText(telem);
@@ -2365,10 +2217,8 @@ void loop() {
   if (millis() - lastSerialDbgMs >= 1000) {
     lastSerialDbgMs = millis();
     long d = readUltrasonicCM();
-    Serial.printf("[STATUS] CAM: %-3s | IMU: %-4s | Yaw: %5.1f | Pitch: %4.1f | Roll: %4.1f | Sonar: %3ld cm | Servo: %3d deg\n",
-      cameraAvailable ? "ON" : "OFF",
-      mpuAvailable ? "OK" : "NONE",
-      yawHeading, pitchAngle, rollAngle, d, radarServo.read());
+    Serial.printf("[STATUS] CAM: %-3s | Sonar: %3ld cm | Servo: %3d deg\n",
+      cameraAvailable ? "ON" : "OFF", d, radarServo.read());
   }
 #endif
 
