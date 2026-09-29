@@ -103,7 +103,7 @@
 // ===================================================================================
 // 2. CONSTANTS & SYSTEM CONFIGURATION
 // ===================================================================================
-const char* FIRMWARE_VERSION  = "2.4.57";
+const char* FIRMWARE_VERSION  = "2.4.58";
 const char* HARDWARE_VERSION  = "ESP32-WROOM-V3-CAM";
 const char* BUILD_DATE        = "2026-09-29";
 const char* AP_DEFAULT_SSID   = "NovaX-Car";

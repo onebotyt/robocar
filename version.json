@@ -1,10 +1,10 @@
 {
-  "version": "2.4.57",
-  "buildCode": 57,
+  "version": "2.4.58",
+  "buildCode": 58,
   "buildDate": "2026-09-29",
   "changelog": "NovaX Pure Robotics Edition: conflict-free pin matrix, MPU6050 attitude HUD, and gyro calibration.",
   "firmware": {
-    "version": "2.4.57",
+    "version": "2.4.58",
     "binUrl": "https://raw.githubusercontent.com/onebotyt/robocar/main/firmware/NovaX-Firmware.bin",
     "releaseDate": "2026-09-29",
     "changelog": "Pure Robotics: MX1508 Motors, HC-SR04 Sonar, SG90 Radar Servo, MPU6050 Gyro HUD and Web OTA."
